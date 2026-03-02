@@ -19,7 +19,8 @@ graph TD
     end
 
     subgraph kachaka_core["kachaka_core (shared)"]
-        CONN["connection.py<br/>Pool mgmt · Health check<br/>Resolver · Normalise"]
+        CONN["connection.py<br/>Pool mgmt · Health check<br/>Resolver · Monitoring"]
+        INT["interceptors.py<br/>TimeoutInterceptor (5s default)<br/>gRPC deadline injection"]
         CMD["commands.py<br/>Movement · Shelf ops<br/>Speech · Manual"]
         QRY["queries.py<br/>Status · Locations<br/>Camera · Map"]
         ERR["error_handling.py<br/>@with_retry · format_grpc_error<br/>Exponential backoff"]
@@ -37,18 +38,23 @@ graph TD
     MCP --> CTRL
     SKILL --> kachaka_core
     APP --> kachaka_core
+    CONN --> INT
     CONN --> ERR
     CMD --> ERR
     QRY --> ERR
     DET --> ERR
     CTRL --> CONN
     CAM --> DET
+    INT --> SDK
     kachaka_core --> SDK
 ```
 
 ## Features
 
 - **Connection pooling** -- `KachakaConnection.get(ip)` returns a cached, thread-safe connection. Same IP always yields the same instance.
+- **gRPC timeout protection** -- `TimeoutInterceptor` injects a 5-second default deadline on every unary gRPC call, preventing indefinite blocking when the robot is unreachable (raw gRPC blocks 15--18 minutes without a deadline).
+- **Connection monitoring** -- `conn.start_monitoring()` runs a background health-check thread that detects disconnection within ~7 seconds and exposes a `ConnectionState` (CONNECTED / DISCONNECTED) with callbacks.
+- **Disconnect-aware components** -- Both `RobotController` and `CameraStreamer` skip gRPC calls while `ConnectionState.DISCONNECTED`, avoiding wasted timeout cycles during network outages.
 - **Automatic retry** -- Transient gRPC errors (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED) are retried with exponential backoff. Non-retryable errors fail immediately.
 - **Unified response format** -- Every method returns `{"ok": True, ...}` or `{"ok": False, "error": "...", "retryable": ...}`.
 - **Name + ID resolver** -- Commands accept location/shelf names or IDs interchangeably. The resolver patches the upstream SDK to support both.
@@ -140,10 +146,11 @@ cmds.speak("Hello, I have arrived")
 
 ### KachakaConnection
 
-Thread-safe, pooled gRPC connection manager.
+Thread-safe, pooled gRPC connection manager with built-in timeout protection and connection monitoring.
 
 ```python
 from kachaka_core import KachakaConnection
+from kachaka_core.connection import ConnectionState
 
 conn = KachakaConnection.get("192.168.1.100")     # Get or create pooled connection
 conn = KachakaConnection.get("192.168.1.100:26400")  # Explicit port (same instance)
@@ -151,10 +158,38 @@ conn = KachakaConnection.get("192.168.1.100:26400")  # Explicit port (same insta
 conn.ping()             # -> {"ok": True, "serial": "...", "pose": {...}}
 conn.ensure_resolver()  # Initialize name-to-ID resolver (idempotent)
 conn.client             # Raw KachakaApiClient for direct SDK access
+conn.state              # ConnectionState.UNKNOWN until monitoring starts
 
 KachakaConnection.remove("192.168.1.100")  # Remove from pool
 KachakaConnection.clear_pool()             # Drop all connections (for tests)
 ```
+
+#### Timeout Protection
+
+Every gRPC call is automatically wrapped by `TimeoutInterceptor` with a 5-second default deadline. Without this, a call to an unreachable robot blocks for 15--18 minutes (TCP retransmission timeout). The timeout is configurable:
+
+```python
+conn = KachakaConnection.get("192.168.1.100", timeout=10.0)  # 10s deadline
+```
+
+#### Connection Monitoring
+
+Start a background health-check thread that pings the robot periodically and maintains a `ConnectionState`:
+
+```python
+def on_state_change(new_state: ConnectionState):
+    print(f"Connection: {new_state.name}")  # CONNECTED or DISCONNECTED
+
+conn.start_monitoring(interval=5.0, on_state_change=on_state_change)
+print(conn.state)  # ConnectionState.CONNECTED
+
+# Block until a specific state is reached
+conn.wait_for_state(ConnectionState.CONNECTED, timeout=30.0)
+
+conn.stop_monitoring()
+```
+
+Both `RobotController` and `CameraStreamer` can be wired to receive state change notifications via their `notify_state_change()` methods. When disconnected, they skip gRPC calls entirely instead of wasting 5 seconds per call on the interceptor timeout.
 
 ### KachakaCommands
 
@@ -272,7 +307,7 @@ detections = streamer.latest_detections
 | `latest_frame` | `dict \| None` | Most recent frame (thread-safe read) |
 | `latest_detections` | `list \| None` | Most recent detection results (requires `detect=True`) |
 | `is_running` | `bool` | Whether the capture thread is alive |
-| `stats` | `dict` | `{total_frames, dropped, drop_rate_pct}` |
+| `stats` | `dict` | `{total_frames, dropped, drop_rate_pct, longest_gap_s, recovery_latency_ms}` |
 
 ### Design Notes
 
@@ -283,6 +318,8 @@ detections = streamer.latest_detections
 - Callback exceptions are caught and logged, never propagated
 - `start()` on an already-running streamer is a no-op
 - `stop()` on a non-running streamer is a no-op
+- **Disconnect-aware**: When `ConnectionState.DISCONNECTED`, the capture loop sleeps instead of attempting gRPC calls that would each waste 5 seconds on the interceptor timeout
+- **Recovery metrics**: Wire `streamer.notify_state_change` to `conn.start_monitoring()` to track `longest_gap_s` and `recovery_latency_ms` in `stats`
 
 ## RobotController
 
@@ -420,6 +457,7 @@ sequenceDiagram
   current command.
 - **Not thread-safe**: `_execute_command` is **not** thread-safe. Callers must
   serialise command execution externally (e.g. with a lock or sequential task queue).
+- **Disconnect-aware**: The background `_state_loop` skips gRPC calls while `ConnectionState.DISCONNECTED`, avoiding wasted timeout cycles. Wire `ctrl.notify_state_change` to `conn.start_monitoring()` to enable this behavior.
 
 ## ObjectDetector
 
@@ -667,6 +705,69 @@ except grpc.RpcError as exc:
     # {"ok": False, "error": "UNAVAILABLE: ...", "retryable": True, "grpc_code": "UNAVAILABLE"}
 ```
 
+## Network Resilience
+
+The toolkit provides five layers of automatic disconnect recovery, designed for robots operating on unstable mesh WiFi networks:
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Toolkit as kachaka_core
+    participant Robot
+
+    Note over App, Robot: Normal operation
+    App->>Toolkit: get_pose()
+    Toolkit->>Robot: gRPC (5s deadline)
+    Robot-->>Toolkit: response (~10ms)
+    Toolkit-->>App: {"ok": True, ...}
+
+    Note over Robot: Network drops (e.g. mesh roaming)
+
+    rect rgb(255, 230, 230)
+        Note over Toolkit: Layer 1: TimeoutInterceptor (5s)
+        App->>Toolkit: get_pose()
+        Toolkit->>Robot: gRPC (5s deadline)
+        Note right of Toolkit: No response — deadline fires at 5s
+        Toolkit-->>Toolkit: DEADLINE_EXCEEDED
+
+        Note over Toolkit: Layer 2: @with_retry (exponential backoff)
+        Toolkit->>Robot: Retry 1 (1s delay)
+        Note right of Toolkit: Still down — 5s timeout
+        Toolkit->>Robot: Retry 2 (2s delay)
+        Note right of Toolkit: Still down — 5s timeout
+        Toolkit-->>App: {"ok": False, "retryable": True}
+    end
+
+    rect rgb(255, 245, 230)
+        Note over Toolkit: Layer 3: ConnectionState monitoring (~7s detection)
+        Toolkit->>Robot: Background ping fails
+        Toolkit-->>Toolkit: state → DISCONNECTED
+        Toolkit-->>App: on_state_change(DISCONNECTED)
+
+        Note over Toolkit: Layer 4 & 5: Components pause
+        Note right of Toolkit: RobotController._state_loop → sleep<br/>CameraStreamer._run → sleep<br/>(no wasted 5s timeouts)
+    end
+
+    Note over Robot: Network recovers
+
+    rect rgb(230, 255, 230)
+        Toolkit->>Robot: Background ping succeeds
+        Toolkit-->>Toolkit: state → CONNECTED
+        Toolkit-->>App: on_state_change(CONNECTED)
+        Note right of Toolkit: RobotController & CameraStreamer<br/>resume immediately
+    end
+```
+
+| Layer | Component | Behaviour | Timing |
+|-------|-----------|-----------|--------|
+| 1 | `TimeoutInterceptor` | Injects 5s deadline on all unary calls | Fires at exactly deadline ±6ms |
+| 2 | `@with_retry` | Retries UNAVAILABLE/DEADLINE_EXCEEDED with exponential backoff | 3 attempts default, or wall-clock deadline mode |
+| 3 | `ConnectionState` monitoring | Background ping detects disconnect | ~7s (ping interval + timeout) |
+| 4 | `RobotController._state_loop` | Skips polling during DISCONNECTED | Immediate resume on CONNECTED |
+| 5 | `CameraStreamer._run` | Skips capture during DISCONNECTED | Immediate resume on CONNECTED |
+
+The gRPC channel itself survives all disconnect types (client-side packet loss, server-side disconnection) and does not require rebuilding. Recovery is automatic once the network path is restored.
+
 ## Testing
 
 The test suite uses pytest with `unittest.mock` to mock all gRPC calls. No live robot connection is required.
@@ -692,14 +793,16 @@ pytest tests/test_commands.py::TestRetry
 
 | Module | Tests | Covers |
 |--------|-------|--------|
-| `test_connection.py` | 14 | Pool management, normalisation, ping, resolver |
+| `test_connection.py` | 22 | Pool management, normalisation, ping, resolver, monitoring, ConnectionState |
 | `test_commands.py` | 16 | Movement, shelf ops, speech, retry, cancel, stop, polling |
 | `test_queries.py` | 13 | Status, locations, shelves, camera, map, errors, info |
-| `test_camera.py` | 24 | Lifecycle, front/back capture, stats, errors, callbacks, thread safety |
-| `test_controller.py` | 39 | State polling, command execution, metrics, move/shelf/return, racing conditions |
+| `test_error_handling.py` | 13 | Retry modes (count + deadline), backoff, non-retryable errors |
+| `test_interceptors.py` | 6 | TimeoutInterceptor default deadline injection, passthrough |
+| `test_camera.py` | 30 | Lifecycle, capture, stats, errors, callbacks, thread safety, disconnect skip, recovery metrics |
+| `test_controller.py` | 46 | State polling, command execution, metrics, move/shelf/return, racing conditions, disconnect handling |
 | `test_detection.py` | 14 | Detections, capture+detect, annotation, label mapping, error handling |
 | `test_server_controller.py` | 9 | MCP controller tools: start/stop lifecycle, idempotency, state dict, error handling |
-| **Total** | **129** | |
+| **Total** | **169** | |
 
 All tests use the `_clean_pool` autouse fixture to ensure isolation between tests.
 
@@ -711,7 +814,8 @@ graph LR
 
     subgraph core["kachaka_core/ — Shared core library"]
         C_INIT["__init__.py — Public exports"]
-        C_CONN["connection.py — Thread-safe pooled gRPC"]
+        C_CONN["connection.py — Thread-safe pooled gRPC + monitoring"]
+        C_INT["interceptors.py — TimeoutInterceptor (5s default)"]
         C_CMD["commands.py — Movement, shelf, speech, manual"]
         C_QRY["queries.py — Status, camera, map queries"]
         C_CAM["camera.py — CameraStreamer daemon thread"]
@@ -734,10 +838,12 @@ graph LR
         P_JSON["plugin.json"]
     end
 
-    subgraph tests["tests/ — pytest suite (129 tests)"]
+    subgraph tests["tests/ — pytest suite (169 tests)"]
         T_CONN["test_connection.py"]
         T_CMD["test_commands.py"]
         T_QRY["test_queries.py"]
+        T_ERR["test_error_handling.py"]
+        T_INT["test_interceptors.py"]
         T_CAM["test_camera.py"]
         T_CTRL["test_controller.py"]
         T_DET["test_detection.py"]
