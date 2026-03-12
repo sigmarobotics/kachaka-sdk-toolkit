@@ -385,14 +385,21 @@ annotated = det.annotate_frame(raw, result["objects"])
 ## Map
 
 ```python
-# Current map as base64 PNG
+# Current map as base64 PNG with full metadata
 map_data = queries.get_map()
-# {"ok": True, "image_base64": "...", "format": "png", "name": "...", ...}
+# {"ok": True, "image_base64": "...", "format": "png", "name": "...",
+#  "resolution": 0.05, "width": 800, "height": 600,
+#  "origin_x": -10.0, "origin_y": -15.0}
 
 # List all maps
 queries.list_maps()
 # {"ok": True, "maps": [{id, name}, ...], "current_map_id": "..."}
 ```
+
+**Map metadata fields:**
+- `resolution` — meters per pixel
+- `width`, `height` — image dimensions in pixels
+- `origin_x`, `origin_y` — world coordinates (meters) of the bottom-left pixel (ROS convention)
 
 ## Error Handling
 

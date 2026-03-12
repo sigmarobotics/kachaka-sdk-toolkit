@@ -176,6 +176,8 @@ class KachakaQueries:
             "resolution": png_map.resolution,
             "width": png_map.width,
             "height": png_map.height,
+            "origin_x": png_map.origin.x,
+            "origin_y": png_map.origin.y,
         }
 
     @with_retry()
