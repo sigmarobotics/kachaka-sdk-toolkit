@@ -35,13 +35,26 @@ class TimeoutInterceptor(grpc.UnaryUnaryClientInterceptor):
     """Add a default timeout to all unary-unary gRPC calls.
 
     If the call already has an explicit timeout, it is left unchanged.
+    Long-polling RPCs used by the SDK's blocking command flow are given a
+    much longer timeout so they can wait for robot movements to complete.
     """
+
+    # RPCs that block until a robot command finishes (long-polling).
+    # These must NOT have a timeout — movement distance is unbounded.
+    _LONG_POLL_METHODS = frozenset({
+        "/kachaka_api.KachakaApi/StartCommand",
+        "/kachaka_api.KachakaApi/GetLastCommandResult",
+        "/kachaka_api.KachakaApi/GetCommandState",
+    })
 
     def __init__(self, default_timeout: float = 10.0):
         self._default_timeout = default_timeout
 
     def intercept_unary_unary(self, continuation, client_call_details, request):
         if client_call_details.timeout is None:
+            method = client_call_details.method
+            if method in self._LONG_POLL_METHODS:
+                return continuation(client_call_details, request)
             new_details = _CallDetails(
                 method=client_call_details.method,
                 timeout=self._default_timeout,
