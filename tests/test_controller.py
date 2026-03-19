@@ -486,6 +486,26 @@ class TestOtherMovementCommands:
         call_args = mock_client.stub.StartCommand.call_args[0][0]
         assert call_args.command.HasField("return_shelf_command")
 
+    def test_dock_any_shelf_with_registration(self):
+        ctrl, mock_client = self._make_ctrl_immediate_success()
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.dock_any_shelf_with_registration("L01", timeout=10)
+        assert result["ok"] is True
+        assert result["action"] == "dock_any_shelf_with_registration"
+        assert result["target"] == "L01"
+        call_args = mock_client.stub.StartCommand.call_args[0][0]
+        assert call_args.command.HasField("dock_any_shelf_with_registration_command")
+
+    def test_dock_any_shelf_with_registration_forward(self):
+        ctrl, mock_client = self._make_ctrl_immediate_success()
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.dock_any_shelf_with_registration(
+                "L01", dock_forward=True, timeout=10,
+            )
+        assert result["ok"] is True
+        pb_cmd = mock_client.stub.StartCommand.call_args[0][0].command
+        assert pb_cmd.dock_any_shelf_with_registration_command.dock_forward is True
+
 
 # ── Error Description Enrichment tests ────────────────────────────
 

@@ -292,6 +292,22 @@ def controller_move_to_location(ip: str, location_name: str) -> dict:
     return ctrl.move_to_location(location_name)
 
 
+@mcp.tool()
+def controller_dock_any_shelf(
+    ip: str, location_name: str, dock_forward: bool = False,
+) -> dict:
+    """Move to a location and dock any shelf there via the background controller.
+
+    Unregistered shelves are automatically registered as new.
+    Requires ``start_controller`` first.
+    """
+    key = _controller_key(ip)
+    ctrl = _controllers.get(key)
+    if ctrl is None:
+        return {"ok": False, "error": "controller not started"}
+    return ctrl.dock_any_shelf_with_registration(location_name, dock_forward)
+
+
 # ── Speech ───────────────────────────────────────────────────────────
 
 @mcp.tool()

@@ -1,7 +1,7 @@
 """RobotController — background state polling + non-blocking command execution.
 
 Provides a unified interface for all movement commands (move_to_location,
-return_home, move_shelf, return_shelf) with:
+return_home, move_shelf, return_shelf, dock_any_shelf_with_registration) with:
 - Background thread continuously reading battery, pose, command state
 - Non-blocking gRPC command execution with command_id verification
 - Deadline-based retry on transient failures
@@ -617,3 +617,32 @@ class RobotController:
         )
         self._monitoring_shelf = False
         return result
+
+    def dock_any_shelf_with_registration(
+        self,
+        location_name: str,
+        dock_forward: bool = False,
+        *,
+        timeout: float = 120.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Move to a location and dock any shelf there, registering it if new."""
+        self._conn.ensure_resolver()
+        location_id = self._conn.resolve_location(location_name)
+        cmd = pb2.Command(
+            dock_any_shelf_with_registration_command=pb2.DockAnyShelfWithRegistrationCommand(
+                target_location_id=location_id,
+                dock_forward=dock_forward,
+            )
+        )
+        return self._execute_command(
+            cmd,
+            "dock_any_shelf_with_registration",
+            location_name,
+            timeout=timeout,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )
