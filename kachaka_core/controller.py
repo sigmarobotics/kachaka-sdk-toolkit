@@ -134,6 +134,7 @@ class RobotController:
         self._state_lock = threading.Lock()
         self._metrics = ControllerMetrics()
         self._monitoring_shelf: bool = False
+        self._shelf_confirmed_docked: bool = False
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -162,6 +163,7 @@ class RobotController:
     def reset_shelf_monitor(self) -> None:
         """Reset the shelf_dropped flag and stop shelf monitoring."""
         self._monitoring_shelf = False
+        self._shelf_confirmed_docked = False
         with self._state_lock:
             self._state.shelf_dropped = False
             self._state.moving_shelf_id = None
@@ -402,18 +404,29 @@ class RobotController:
                 continue
 
             # Shelf monitoring — detect drops during command execution
+            # Only trigger shelf_dropped when the shelf was confirmed docked
+            # (mid was non-empty at least once) and then disappeared.
+            # This avoids false positives during the dock phase of move_shelf
+            # where the robot is still moving toward the shelf.
             if self._monitoring_shelf:
                 try:
                     mid = self._conn.client.get_moving_shelf_id() or ""
                     with self._state_lock:
                         prev = self._state.moving_shelf_id
-                        self._state.moving_shelf_id = mid or None
-                        if prev and not mid:
+                        if mid:
+                            # Shelf confirmed docked — track it
+                            self._state.moving_shelf_id = mid
+                            self._shelf_confirmed_docked = True
+                        elif self._shelf_confirmed_docked and prev:
+                            # Was docked, now gone — real drop
+                            self._state.moving_shelf_id = None
                             self._state.shelf_dropped = True
                             logger.warning("Shelf dropped during command: %s", prev)
                             if self._on_shelf_dropped:
                                 self._on_shelf_dropped(prev)
                             self._monitoring_shelf = False
+                            self._shelf_confirmed_docked = False
+                        # else: not yet docked — keep waiting
                 except Exception:
                     logger.debug("Shelf monitor poll error", exc_info=True)
 
@@ -548,13 +561,13 @@ class RobotController:
                 destination_location_id=location_id,
             )
         )
-        # Start shelf monitoring BEFORE the command so drops during
-        # transit are detected by the polling loop in _execute_command.
-        # Seed moving_shelf_id so even if the first poll sees it gone,
-        # the prev→empty transition triggers shelf_dropped.
+        # Start shelf monitoring BEFORE the command. Don't seed moving_shelf_id —
+        # wait for get_moving_shelf_id() to confirm the shelf is actually docked.
+        # This avoids false shelf_dropped during the dock phase.
         with self._state_lock:
             self._state.shelf_dropped = False
-            self._state.moving_shelf_id = shelf_id
+            self._state.moving_shelf_id = None
+        self._shelf_confirmed_docked = False
         self._monitoring_shelf = True
         return self._execute_command(
             cmd,
