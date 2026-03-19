@@ -213,15 +213,17 @@ class RobotController:
 
             now = time.time()
 
-            # Fast cycle: pose + command state
+            # Fast cycle: pose + command state + moving shelf
             try:
                 pose = sdk.get_robot_pose()
                 is_running = sdk.is_command_running()
+                moving_shelf = sdk.get_moving_shelf_id() or None
                 with self._state_lock:
                     self._state.pose_x = pose.x
                     self._state.pose_y = pose.y
                     self._state.pose_theta = pose.theta
                     self._state.is_command_running = is_running
+                    self._state.moving_shelf_id = moving_shelf
                     self._state.last_updated = now
             except Exception:
                 logger.debug("State poll (fast) error", exc_info=True)
@@ -263,12 +265,14 @@ class RobotController:
             pose = sdk.get_robot_pose()
             is_running = sdk.is_command_running()
             battery_pct, _ = sdk.get_battery_info()
+            moving_shelf = sdk.get_moving_shelf_id() or None
             with self._state_lock:
                 self._state.pose_x = pose.x
                 self._state.pose_y = pose.y
                 self._state.pose_theta = pose.theta
                 self._state.is_command_running = is_running
                 self._state.battery_pct = int(battery_pct)
+                self._state.moving_shelf_id = moving_shelf
                 self._state.last_updated = time.time()
         except Exception:
             logger.debug("Reconnect probe failed", exc_info=True)
