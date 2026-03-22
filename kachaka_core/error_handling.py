@@ -122,14 +122,3 @@ def with_retry(
         return wrapper
 
     return decorator
-
-
-def format_grpc_error(exc: grpc.RpcError) -> dict:
-    """Convert a gRPC exception into a structured error dict."""
-    code = exc.code()
-    return {
-        "ok": False,
-        "error": f"{code.name}: {exc.details() or ''}",
-        "retryable": code in RETRYABLE_CODES,
-        "grpc_code": code.name,
-    }

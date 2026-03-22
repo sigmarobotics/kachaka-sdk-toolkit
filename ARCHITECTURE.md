@@ -20,7 +20,7 @@ graph TD
         CONN["connection.py<br/>Pool mgmt · Health check<br/>Resolver · Normalise"]
         CMD["commands.py<br/>Movement · Shelf ops<br/>Speech · Map mgmt · Manual"]
         QRY["queries.py<br/>Status · Locations<br/>Camera · Map"]
-        ERR["error_handling.py<br/>@with_retry · format_grpc_error<br/>Exponential backoff"]
+        ERR["error_handling.py<br/>@with_retry<br/>Exponential backoff"]
         CAM["camera.py<br/>CameraStreamer (daemon thread)<br/>Detection overlay · Stats"]
         DET["detection.py<br/>ObjectDetector (on-device)<br/>Bbox annotation (PIL)"]
         CTRL["controller.py<br/>RobotController<br/>Background polling · Metrics"]
@@ -56,7 +56,7 @@ graph TD
 - `ensure_resolver()` initialises the name-to-ID mapping tables (idempotent).
 - `resolve_location(name_or_id)` and `resolve_shelf(name_or_id)` translate human-readable names into gRPC IDs. All resolution happens in this layer, **not** in the upstream SDK's resolver.
 
-**Internal dependencies**: `error_handling.py` (`@with_retry`, `format_grpc_error`).
+**Internal dependencies**: `error_handling.py` (`@with_retry`).
 
 **External dependencies**: `kachaka_api.KachakaApiClient`.
 
@@ -96,7 +96,6 @@ graph TD
 
 **Key responsibilities**:
 - `@with_retry(max_attempts, base_delay, max_delay)` decorator with exponential backoff for transient gRPC errors (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED).
-- `format_grpc_error(exc)` converts gRPC exceptions into structured dicts.
 - Non-retryable errors (INVALID_ARGUMENT, NOT_FOUND) fail immediately.
 
 **Data flow**: Every `@with_retry`-decorated method produces `{"ok": True, ...}` on success or `{"ok": False, "error": "...", "retryable": ...}` on failure.

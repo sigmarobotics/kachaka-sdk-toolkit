@@ -34,6 +34,12 @@ jobs:
           git diff --cached --quiet || git commit -m "chore: sync marketplace.json version to ${GITHUB_REF_NAME}"
           git push origin HEAD:master
 
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+          sed -i "s/^version = .*/version = $VERSION/" setup.cfg
+
       - name: Build
         run: |
           pip install build

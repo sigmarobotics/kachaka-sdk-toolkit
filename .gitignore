@@ -7,5 +7,9 @@ __pycache__/
 .venv/
 .pytest_cache/
 dist/
-
+.serena/
+shelf_drop_log.csv
+data/
+scripts/
 docs/plans/
+docs/superpowers/

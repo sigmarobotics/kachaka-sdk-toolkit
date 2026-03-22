@@ -23,7 +23,7 @@ graph TD
         INT["interceptors.py<br/>TimeoutInterceptor (5s default)<br/>gRPC deadline injection"]
         CMD["commands.py<br/>Movement · Shelf ops<br/>Speech · Map mgmt · Manual"]
         QRY["queries.py<br/>Status · Locations<br/>Camera · Map"]
-        ERR["error_handling.py<br/>@with_retry · format_grpc_error<br/>Exponential backoff"]
+        ERR["error_handling.py<br/>@with_retry<br/>Exponential backoff"]
         CAM["camera.py<br/>CameraStreamer (daemon thread)<br/>Detection overlay · Stats"]
         DET["detection.py<br/>ObjectDetector (on-device)<br/>Bbox annotation (PIL)"]
         CTRL["controller.py<br/>RobotController<br/>Background polling · Metrics"]
@@ -706,18 +706,6 @@ def my_operation(sdk):
     return sdk.some_method()
 ```
 
-### Manual Error Formatting
-
-```python
-from kachaka_core.error_handling import format_grpc_error
-
-try:
-    sdk.some_method()
-except grpc.RpcError as exc:
-    error_dict = format_grpc_error(exc)
-    # {"ok": False, "error": "UNAVAILABLE: ...", "retryable": True, "grpc_code": "UNAVAILABLE"}
-```
-
 ## Network Resilience
 
 The toolkit provides five layers of automatic disconnect recovery, designed for robots operating on unstable mesh WiFi networks:
@@ -834,7 +822,7 @@ graph LR
         C_CAM["camera.py — CameraStreamer daemon thread"]
         C_CTRL["controller.py — RobotController + polling"]
         C_DET["detection.py — ObjectDetector + annotation"]
-        C_ERR["error_handling.py — @with_retry, format_grpc_error"]
+        C_ERR["error_handling.py — @with_retry"]
     end
 
     subgraph mcp["mcp_server/ — MCP Server layer"]
