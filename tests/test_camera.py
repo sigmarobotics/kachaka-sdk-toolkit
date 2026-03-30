@@ -523,3 +523,35 @@ class TestRecoveryMetrics:
 
         cs.notify_state_change(ConnectionState.DISCONNECTED)
         assert cs._reconnected_at is None
+
+
+class TestLatestFrameBytes:
+    def test_returns_none_when_no_frame(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        cs = CameraStreamer(conn)
+        assert cs.latest_frame_bytes is None
+
+    def test_returns_decoded_jpeg_bytes(self):
+        mock = MagicMock()
+        raw = b"\xff\xd8jpeg-data-here"
+        mock.get_front_camera_ros_compressed_image.return_value = MagicMock(
+            data=raw, format="jpeg"
+        )
+        conn = _make_conn(mock)
+        cs = CameraStreamer(conn, interval=0.05)
+
+        cs.start()
+        time.sleep(0.15)
+        cs.stop()
+
+        result = cs.latest_frame_bytes
+        assert result == raw
+        assert isinstance(result, bytes)
+
+    def test_returns_none_when_frame_not_ok(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        cs = CameraStreamer(conn)
+        cs._latest_frame = {"ok": False}
+        assert cs.latest_frame_bytes is None

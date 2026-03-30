@@ -121,6 +121,15 @@ class CameraStreamer:
             return self._latest_frame
 
     @property
+    def latest_frame_bytes(self) -> bytes | None:
+        """Most recent frame as raw JPEG bytes. None if no frame available."""
+        with self._lock:
+            frame = self._latest_frame
+        if frame is None or not frame.get("ok"):
+            return None
+        return base64.b64decode(frame["image_base64"])
+
+    @property
     def latest_detections(self) -> Optional[list]:
         """Most recent detection results (dict list). Requires detect=True."""
         with self._lock:
