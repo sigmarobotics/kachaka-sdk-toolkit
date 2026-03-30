@@ -63,6 +63,35 @@ KachakaConnection.remove("192.168.1.100")
 - **TimeoutInterceptor** (5s default) is installed on every connection — all unary gRPC calls get a 5s deadline to prevent indefinite blocking during network loss
 - Customise timeout: `KachakaConnection.get("192.168.1.100", timeout=10.0)`
 
+## Cached Device Info
+
+`KachakaConnection` lazily caches static and semi-static data to
+eliminate repeated gRPC calls:
+
+### Tier 1 — Permanent (session lifetime)
+
+```python
+conn = KachakaConnection.get("192.168.1.100")
+
+conn.serial            # "BKP40EB1T" — fetched once
+conn.version           # "3.15.4" — fetched once
+conn.error_definitions # {10253: {"title": "No destinations", "description": "..."}, ...}
+```
+
+### Tier 2 — Semi-static (manual invalidation)
+
+```python
+conn.shortcuts         # [{"id": "sc-1", "name": "Patrol A"}, ...]
+conn.map_list          # [{"id": "map-1", "name": "Floor1"}, ...]
+conn.current_map_id    # "map-1"
+conn.map_image         # {"png_bytes": b"...", "width": 200, "height": 200, ...}
+
+conn.refresh_shortcuts()  # clear shortcuts cache
+conn.refresh_maps()       # clear map_list + current_map_id + map_image
+```
+
+`switch_map()` automatically calls `refresh_maps()` on success.
+
 ## Movement Commands
 
 ```python
@@ -169,6 +198,44 @@ capture_with_detection(ip="192.168.1.100")
 
 get_map(ip="192.168.1.100")
 # → [ImageContent(...), TextContent(text='{"format": "png", "name": "...", ...}')]
+```
+
+## Camera Availability
+
+Not all cameras are available at all times. These constraints come from
+the robot firmware:
+
+| Camera | Image Capture | Intrinsics | Constraint |
+|--------|--------------|------------|------------|
+| Front  | Always       | After stream started | `start_camera_stream("front")` activates it |
+| Back   | Always       | After stream started | `start_camera_stream("back")` activates it |
+| ToF    | Off-charger only | Firmware-dependent | Move robot off charger first; some FW returns CANCELLED for intrinsics even off-charger |
+
+### Camera Intrinsics
+
+```python
+queries = KachakaQueries(conn)
+
+# Must start camera stream first for front/back
+result = queries.get_camera_intrinsics("front")
+# {"ok": True, "camera": "front", "width": 1280, "height": 720,
+#  "fx": 509.8, "fy": 504.4, "cx": 627.7, "cy": 348.6,
+#  "distortion_model": "plumb_bob", "D": [...], "K": [...], ...}
+
+result = queries.get_camera_intrinsics("tof")  # robot must be off charger
+```
+
+### ToF Depth Image
+
+```python
+result = queries.get_tof_image()
+# {"ok": True, "width": 160, "height": 120, "encoding": "16UC1",
+#  "image_base64": "...", ...}
+
+# Decode:
+import numpy as np, base64
+depth = np.frombuffer(base64.b64decode(result["image_base64"]),
+                      dtype=np.uint16).reshape(120, 160)
 ```
 
 ## RobotController (Background Polling + Non-blocking Commands)
@@ -341,6 +408,15 @@ detections = streamer.latest_detections
 - `detect=True, annotate=False` — raw frame + detection results (no bbox)
 - `detect=True, annotate=True` — annotated frame + detection results
 - Default `detect=False, annotate=False` — unchanged behavior
+
+### Raw Bytes Access
+
+```python
+streamer = CameraStreamer(conn, interval=1.0)
+streamer.start()
+...
+raw_jpeg = streamer.latest_frame_bytes  # bytes | None — no base64 decode needed
+```
 
 ## Object Detection
 
