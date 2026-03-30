@@ -465,6 +465,31 @@ def get_camera_stats(ip: str, camera: str = "front") -> dict:
     return {"ok": True, **streamer.stats, "is_running": streamer.is_running}
 
 
+# ── Camera intrinsics ───────────────────────────────────────────────
+
+@mcp.tool()
+def get_camera_intrinsics(ip: str, camera: str = "front") -> dict:
+    """Get camera intrinsics (focal length, principal point, distortion).
+
+    Camera must be active first — call ``start_camera_stream`` before querying.
+    For ToF camera, the robot must NOT be on the charger.
+    Valid cameras: front, back, tof.
+    """
+    return KachakaQueries(KachakaConnection.get(ip)).get_camera_intrinsics(camera)
+
+
+# ── ToF camera ──────────────────────────────────────────────────────
+
+@mcp.tool()
+def get_tof_image(ip: str) -> dict:
+    """Capture a depth image from the ToF (Time-of-Flight) camera.
+
+    Returns raw 16-bit depth data (16UC1 encoding, 160x120).
+    NOT available while the robot is on the charger — move it off first.
+    """
+    return KachakaQueries(KachakaConnection.get(ip)).get_tof_image()
+
+
 # ── Object Detection ────────────────────────────────────────────────
 
 @mcp.tool()

@@ -164,6 +164,83 @@ class KachakaQueries:
         b64 = base64.b64encode(img.data).decode()
         return {"ok": True, "image_base64": b64, "format": img.format or "jpeg"}
 
+    # ── Camera intrinsics ───────────────────────────────────────────
+
+    _INTRINSICS_METHODS = {
+        "front": "get_front_camera_ros_camera_info",
+        "back": "get_back_camera_ros_camera_info",
+        "tof": "get_tof_camera_ros_camera_info",
+    }
+
+    def get_camera_intrinsics(self, camera: str = "front") -> dict:
+        """ROS CameraInfo intrinsics for front, back, or tof camera.
+
+        Camera availability:
+        - front/back: Available after the camera stream is started.
+          May return CANCELLED if the camera has never been activated
+          in this session.
+        - tof: NOT available while the robot is on the charger.
+          Move the robot off the charger before querying ToF intrinsics.
+          Some firmware versions may not support ToF camera_info at all
+          (image capture still works).
+        """
+        method_name = self._INTRINSICS_METHODS.get(camera)
+        if method_name is None:
+            return {"ok": False, "error": f"Invalid camera {camera!r}; must be front, back, or tof"}
+        try:
+            info = getattr(self.sdk, method_name)()
+            K = list(info.K)
+            return {
+                "ok": True,
+                "camera": camera,
+                "width": info.width,
+                "height": info.height,
+                "distortion_model": info.distortion_model,
+                "D": list(info.D),
+                "K": K,
+                "R": list(info.R),
+                "P": list(info.P),
+                "fx": K[0],
+                "fy": K[4],
+                "cx": K[2],
+                "cy": K[5],
+            }
+        except Exception as exc:
+            error_str = str(exc)
+            if "CANCELLED" in error_str:
+                return {
+                    "ok": False,
+                    "error": f"Camera {camera} not available — start the camera stream first, "
+                             f"or move off charger for ToF. (gRPC CANCELLED)",
+                    "camera": camera,
+                }
+            return {"ok": False, "error": error_str, "camera": camera}
+
+    # ── ToF camera ──────────────────────────────────────────────────
+
+    def get_tof_image(self) -> dict:
+        """Raw 16-bit depth image from the ToF camera.
+
+        NOT available while robot is on the charger.
+        Returns base64-encoded raw bytes (16UC1 = 16-bit unsigned, 1 channel).
+        Decode with: np.frombuffer(base64.b64decode(b64), dtype=np.uint16).reshape(h, w)
+        """
+        try:
+            img = self.sdk.get_tof_camera_ros_image()
+            b64 = base64.b64encode(img.data).decode()
+            return {
+                "ok": True,
+                "image_base64": b64,
+                "width": img.width,
+                "height": img.height,
+                "encoding": img.encoding,
+                "step": img.step,
+                "is_bigendian": img.is_bigendian,
+                "frame_id": img.header.frame_id,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     # ── Map ──────────────────────────────────────────────────────────
 
     @with_retry()
