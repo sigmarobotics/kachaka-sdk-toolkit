@@ -5,6 +5,16 @@ description: Use when tasks involve Kachaka robot control, status queries, conne
 
 # Kachaka Robot SDK Skill
 
+## Critical Rules (READ FIRST)
+
+**STOP. Before writing ANY Kachaka code, internalize these 5 rules.**
+
+1. **INSTALL**: `kachaka-sdk-toolkit` is a **PyPI package**. Install with `pip install kachaka-sdk-toolkit`. NEVER use `git+https://` URLs. NEVER copy `kachaka_core/` into your project.
+2. **CONNECT**: `KachakaConnection.get(ip)` is the ONLY way to get a connection. NEVER instantiate `KachakaApiClient` directly — you lose pooling, retry, resolver, timeout, and monitoring.
+3. **RETRY**: `@with_retry` is already applied to ALL KachakaCommands and KachakaQueries methods. NEVER write `try/except` + `time.sleep` retry loops — the SDK handles this.
+4. **CAMERA**: `CameraStreamer` runs in a background daemon thread. NEVER call `get_front_camera_image()` in a loop — it blocks your main thread and drops frames.
+5. **PATROL**: Use `RobotController` for multi-step sequences (background polling + metrics + command_id verification). `KachakaCommands` is for simple one-shot operations ONLY.
+
 ## When to Use
 
 When a task involves **Kachaka robot** control, status queries, connection management, or patrol scripting — read this skill.
@@ -16,20 +26,41 @@ This layer is shared with the MCP Server, ensuring conversation-tested behaviour
 
 ## Installation
 
+`kachaka-sdk-toolkit` is published on **PyPI**. Install as a standard Python package:
+
 ```bash
-pip install -e /path/to/kachaka-sdk-toolkit
+pip install kachaka-sdk-toolkit          # PyPI (production)
+pip install -e /path/to/local/checkout   # Editable (development)
 ```
+
+In `requirements.txt` or `pyproject.toml`:
+```
+kachaka-sdk-toolkit>=0.3.0
+```
+
+> :x: **NEVER**: `pip install git+https://github.com/...` — the package is on PyPI
+> :x: **NEVER**: Copy `kachaka_core/` directory into your project — causes version drift
 
 ## Quick Start
 
 ```python
-from kachaka_core.connection import KachakaConnection
+from kachaka_core.connection import KachakaConnection, ConnectionState
 from kachaka_core.commands import KachakaCommands
 from kachaka_core.queries import KachakaQueries
 
-# Connect (port 26400 appended automatically)
+# 1. Connect (port 26400 appended automatically)
 conn = KachakaConnection.get("192.168.1.100")
-result = conn.ping()   # {"ok": True, "serial": "...", "pose": {...}}
+
+# 2. Start background monitoring (enables conn.state + lazy cache population)
+conn.start_monitoring(interval=5.0)
+
+# 3. Initialise name→ID resolver (required before name-based commands)
+conn.ensure_resolver()
+
+# Now available:
+# conn.state    → ConnectionState.CONNECTED / DISCONNECTED (real-time)
+# conn.serial   → "KCK-XXXX" (lazy-fetched, permanent cache)
+# conn.version  → "3.15.4" (lazy-fetched, permanent cache)
 
 cmds = KachakaCommands(conn)
 queries = KachakaQueries(conn)
@@ -62,6 +93,69 @@ KachakaConnection.remove("192.168.1.100")
 - Resolver supports both name and ID lookups (bio-patrol pattern)
 - **TimeoutInterceptor** (5s default) is installed on every connection — all unary gRPC calls get a 5s deadline to prevent indefinite blocking during network loss
 - Customise timeout: `KachakaConnection.get("192.168.1.100", timeout=10.0)`
+
+> :x: **NEVER** instantiate `KachakaApiClient(ip)` directly — you lose connection pooling, retry, resolver, timeout interceptor, and health monitoring. Every direct client leaks a gRPC channel.
+
+## Connection Monitoring
+
+`start_monitoring()` runs a background daemon thread that pings the robot at a fixed interval and updates `conn.state` in real-time. **You must call this** if you want `conn.state` to reflect actual connectivity — without it, `state` always reads `CONNECTED`.
+
+```python
+from kachaka_core.connection import KachakaConnection, ConnectionState
+
+conn = KachakaConnection.get("192.168.1.100")
+
+# Start background health-check loop
+conn.start_monitoring(interval=5.0)
+
+# Real-time state (thread-safe read)
+if conn.state == ConnectionState.CONNECTED:
+    print("Robot online")
+else:
+    print("Robot offline")
+```
+
+### With state change callback
+
+```python
+def on_change(new_state: ConnectionState):
+    if new_state == ConnectionState.DISCONNECTED:
+        print("⚠ Robot disconnected!")
+    else:
+        print("✓ Robot reconnected")
+
+conn.start_monitoring(interval=5.0, on_state_change=on_change)
+```
+
+### Blocking wait for connection
+
+```python
+# Wait up to 10s for robot to come online
+conn.start_monitoring()
+if conn.wait_for_state(ConnectionState.CONNECTED, timeout=10.0):
+    print("Robot ready")
+else:
+    print("Timeout — robot not reachable")
+```
+
+### Lifecycle notes
+
+- **Idempotent** — calling `start_monitoring()` again while running is a no-op
+- **`RobotController.start()` calls this internally** — but only when controller starts. If you need `conn.state` before the first patrol (e.g., on app startup for health check API), call `start_monitoring()` explicitly at startup
+- `stop_monitoring()` stops the background thread and clears the callback
+- The background thread is a daemon — auto-exits when the process ends
+
+### Recommended startup pattern for FastAPI apps
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    conn = KachakaConnection.get(ROBOT_IP)
+    conn.start_monitoring(interval=5.0, on_state_change=handle_state_change)
+    conn.ensure_resolver()
+    yield
+    conn.stop_monitoring()
+```
 
 ## Cached Device Info
 
@@ -116,6 +210,9 @@ cmds.return_home()
 result = cmds.poll_until_complete(timeout=60.0)
 # {"ok": True, "error_code": 0, "command": "...", "elapsed": 12.3}
 ```
+
+> :x: **NEVER** call `sdk.move_to_location()` raw — use `cmds.move_to_location()` which auto-initialises the resolver. Raw SDK calls require manual name->ID resolution.
+> :x: **NEVER** write a `while` loop polling `get_command_state()` — use `cmds.poll_until_complete()` which handles timeout, command_id verification, and error enrichment.
 
 ## Shelf Operations
 
@@ -200,6 +297,8 @@ get_map(ip="192.168.1.100")
 # → [ImageContent(...), TextContent(text='{"format": "png", "name": "...", ...}')]
 ```
 
+> :warning: Single-shot `get_front_camera_image()` is fine for one-time captures. For continuous monitoring, you MUST use `CameraStreamer` (next section). Calling single-shot in a loop blocks the thread and causes 30-40% higher RTT.
+
 ## Camera Availability
 
 Not all cameras are available at all times. These constraints come from
@@ -245,6 +344,9 @@ For long-running movement commands with metrics collection, use `RobotController
 **When to use RobotController vs KachakaCommands:**
 - `KachakaCommands`: Simple one-shot commands, blocking calls, `@with_retry` for gRPC errors
 - `RobotController`: Multi-step patrols, metrics collection (RTT, poll counts), background state monitoring, command_id verification
+
+> :x: **NEVER** use `KachakaCommands` for patrol sequences — you lose background state polling, metrics collection, command_id verification, and shelf drop detection.
+> :x: **NEVER** write your own background polling thread — `RobotController` already provides `state` property with thread-safe snapshots updated every `fast_interval`.
 
 ```python
 from kachaka_core import KachakaConnection, RobotController
@@ -374,6 +476,8 @@ streamer.stop()
 print(streamer.stats)  # {"total_frames": 120, "dropped": 3, "drop_rate_pct": 2.4}
 ```
 
+> :x: **NEVER** write `while True: img = queries.get_front_camera_image()` — this blocks the calling thread. `CameraStreamer` runs in a daemon thread with zero main-thread blocking.
+
 ### With callback
 
 ```python
@@ -442,6 +546,8 @@ annotated = det.annotate_frame(raw, result["objects"])
 # Returns annotated JPEG bytes (not base64)
 ```
 
+> :x: **NEVER** write your own PIL bbox drawing code — `ObjectDetector.annotate_frame()` handles label colors, font sizing, and distance overlay. Also available via `CameraStreamer(detect=True, annotate=True)`.
+
 ### Labels
 
 | label_id | label | bbox color |
@@ -482,6 +588,8 @@ queries.list_maps()
 ### Built-in retry
 
 All `@with_retry` methods automatically retry on transient gRPC errors (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED) with exponential backoff. Non-retryable errors fail immediately.
+
+> :x: **NEVER** write custom retry logic (try/except + sleep + counter). ALL KachakaCommands and KachakaQueries methods already have `@with_retry` with exponential backoff for UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED. Your manual retry wraps retry-inside-retry.
 
 ### Return format
 
@@ -553,20 +661,46 @@ def my_new_command(ip: str, param: str) -> dict:
     return KachakaCommands(KachakaConnection.get(ip)).my_new_command(param)
 ```
 
-## Anti-patterns
+## SDK Feature Map — Use These, NEVER Reimplement
 
-| Don't | Do Instead |
-|-------|-----------|
-| `KachakaApiClient(ip)` directly | `KachakaConnection.get(ip)` |
-| Write your own retry logic | Use `@with_retry` decorator |
-| Forget to poll command status | Use `poll_until_complete()` |
-| Block main thread on long gRPC | Run in a separate thread |
-| Call `get_front_camera_image()` in tight loop | Use `CameraStreamer` for continuous capture |
-| Hard-code robot IP | Pass as parameter or env var |
-| Ignore `result["ok"]` | Always check before proceeding |
-| Call `sdk.move_to_location()` raw | Use `cmds.move_to_location()` which handles resolver |
-| Use `KachakaCommands` for patrol sequences with metrics | Use `RobotController` for background polling + command_id verified execution |
-| Check `GetCommandState` state only for completion | Also check `command_id` change — idle state is PENDING with empty command_id |
+| When you need to... | Use this | NEVER do this |
+|---------------------|----------|---------------|
+| Connect to a robot | `KachakaConnection.get(ip)` | `KachakaApiClient(ip)` directly |
+| Retry on gRPC failure | Already built-in (`@with_retry`) | `try/except` + `time.sleep` loop |
+| Get robot serial/version | `conn.serial`, `conn.version` (cached) | Query + cache yourself |
+| Resolve location name->ID | `conn.resolve_location(name)` | `list_locations()` + filter |
+| Resolve shelf name->ID | `conn.resolve_shelf(name)` | `list_shelves()` + filter |
+| Stream camera frames | `CameraStreamer(conn, interval=1.0)` | `while True: get_front_camera_image()` |
+| Get latest frame (non-blocking) | `streamer.latest_frame` | Poll camera in main thread |
+| Wait for command completion | `cmds.poll_until_complete()` | `while` loop on `get_command_state()` |
+| Background robot state | `RobotController` + `ctrl.state` | Own polling thread + `get_status()` |
+| Collect patrol metrics | `ctrl.metrics` (RTT, poll counts) | Manual timing with `time.time()` |
+| Detect objects in frame | `ObjectDetector.get_detections()` | Raw SDK `get_object_detection()` |
+| Draw detection bboxes | `ObjectDetector.annotate_frame(img, objects)` | PIL `ImageDraw` code |
+| Stream + detect + annotate | `CameraStreamer(detect=True, annotate=True)` | Separate detector + drawer |
+| Monitor connection health | `conn.start_monitoring(interval=5.0)` | Own ping loop |
+| Handle disconnection | Built-in (5-layer resilience) | Custom reconnection logic |
+| Track camera frame stats | `streamer.stats` (drop rate, recovery) | Manual frame counters |
+| Shelf drop detection | `RobotController` (auto-tracks) | Poll `get_moving_shelf()` yourself |
+| Error descriptions | Auto-enriched in all results | `get_error_definitions()` + manual lookup |
+| gRPC timeout protection | `TimeoutInterceptor` (5s default) | Per-call `timeout=` parameter |
+
+## Anti-patterns Summary
+
+See inline :x: markers throughout this document for detailed anti-patterns with context. Quick reference:
+
+| Category | Don't | Do Instead |
+|----------|-------|-----------|
+| Connection | `KachakaApiClient(ip)` | `KachakaConnection.get(ip)` |
+| Retry | Custom try/except/sleep | Built-in `@with_retry` |
+| Camera | `get_front_camera_image()` in loop | `CameraStreamer` |
+| Commands | Raw `sdk.move_to_location()` | `cmds.move_to_location()` |
+| Polling | Manual `get_command_state()` loop | `poll_until_complete()` |
+| Patrols | `KachakaCommands` for sequences | `RobotController` |
+| Detection | Own PIL bbox drawing | `ObjectDetector.annotate_frame()` |
+| IP | Hard-coded robot IP | Parameter or env var |
+| Install | `git+https://` or copy source | `pip install kachaka-sdk-toolkit` (PyPI) |
+| State check | Only check command state | Also check `command_id` change |
 
 ## SDK Reference
 
