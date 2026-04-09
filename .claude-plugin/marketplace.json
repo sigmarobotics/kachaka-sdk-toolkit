@@ -7,7 +7,7 @@
     {
       "name": "kachaka",
       "description": "Kachaka Robot SDK — 47 MCP tools for AI-driven robot control",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "source": {
         "source": "github",
         "repo": "Sigma-Snaken/kachaka-sdk-toolkit"

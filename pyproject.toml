@@ -34,7 +34,7 @@ build-backend = "setuptools.build_meta"
 include = ["kachaka_core*", "mcp_server*", "kachaka_sdk_toolkit*"]
 
 [tool.setuptools_scm]
-fallback_version = "0.4.0"
+fallback_version = "0.4.1"
 
 [dependency-groups]
 dev = [
