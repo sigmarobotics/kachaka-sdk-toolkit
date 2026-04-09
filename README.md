@@ -1,10 +1,10 @@
 # kachaka-sdk-toolkit
 
-A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 53 tools for AI-driven robot control, and a Skill reference document for development-time agents.
+A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 66 tools for AI-driven robot control, and a Skill reference document for development-time agents.
 
 ## Overview
 
-Kachaka robots expose a gRPC API through the [kachaka-api](https://github.com/pf-robotics/kachaka-api) SDK. This toolkit wraps that SDK with production-grade infrastructure -- thread-safe connection pooling, automatic retry with exponential backoff, structured error responses, and background camera streaming -- so that every consumer (MCP Server, application scripts, patrol systems) shares the same battle-tested code path.
+Kachaka robots expose a gRPC API through the [kachaka-api](https://github.com/pf-robotics/kachaka-api) SDK. This toolkit wraps that SDK with production-grade infrastructure -- thread-safe connection pooling, automatic retry with exponential backoff, gRPC timeout protection, connection health monitoring, structured error responses, background camera/transform streaming, and two-tier device-info caching -- so that every consumer (MCP Server, application scripts, patrol systems) shares the same battle-tested code path.
 
 The project follows a layered architecture: a core library (`kachaka_core`) handles all robot communication, while the MCP Server and Skill document are thin layers on top.
 
@@ -13,20 +13,21 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 ```mermaid
 graph TD
     subgraph Consumers
-        MCP["MCP Server<br/>(53 tools, stdio)"]
+        MCP["MCP Server<br/>(66 tools, stdio)"]
         SKILL["Skill .md"]
         APP["Your Script<br/>or App"]
     end
 
     subgraph kachaka_core["kachaka_core (shared)"]
-        CONN["connection.py<br/>Pool mgmt · Health check<br/>Resolver · Monitoring"]
+        CONN["connection.py<br/>Pool mgmt · Health check<br/>Resolver · Two-tier cache"]
         INT["interceptors.py<br/>TimeoutInterceptor (5s default)<br/>gRPC deadline injection"]
-        CMD["commands.py<br/>Movement · Shelf ops<br/>Speech · Map mgmt · Manual"]
-        QRY["queries.py<br/>Status · Locations<br/>Camera · Map"]
+        CMD["commands.py<br/>Movement · Shelf ops · Torch<br/>Speech · Map mgmt · Manual"]
+        QRY["queries.py<br/>Status · Camera intrinsics<br/>ToF · Locations · Map"]
         ERR["error_handling.py<br/>@with_retry<br/>Exponential backoff"]
         CAM["camera.py<br/>CameraStreamer (daemon thread)<br/>Detection overlay · Stats"]
         DET["detection.py<br/>ObjectDetector (on-device)<br/>Bbox annotation (PIL)"]
         CTRL["controller.py<br/>RobotController<br/>Background polling · Metrics"]
+        TF["transform.py<br/>TransformStreamer<br/>Dynamic TF · Auto-reconnect"]
     end
 
     SDK["kachaka-api SDK (gRPC)<br/>KachakaApiClient → Robot :26400"]
@@ -36,6 +37,7 @@ graph TD
     MCP --> QRY
     MCP --> DET
     MCP --> CTRL
+    MCP --> TF
     SKILL --> kachaka_core
     APP --> kachaka_core
     CONN --> INT
@@ -54,35 +56,41 @@ graph TD
 - **Connection pooling** -- `KachakaConnection.get(ip)` returns a cached, thread-safe connection. Same IP always yields the same instance.
 - **gRPC timeout protection** -- `TimeoutInterceptor` injects a 5-second default deadline on every unary gRPC call, preventing indefinite blocking when the robot is unreachable (raw gRPC blocks 15--18 minutes without a deadline).
 - **Connection monitoring** -- `conn.start_monitoring()` runs a background health-check thread that detects disconnection within ~7 seconds and exposes a `ConnectionState` (CONNECTED / DISCONNECTED) with callbacks.
+- **Two-tier device-info cache** -- Tier 1 (permanent): serial, version, error_definitions. Tier 2 (semi-static, manually refreshable): shortcuts, maps, map images. Reduces redundant gRPC round-trips for data that rarely changes.
 - **Disconnect-aware components** -- Both `RobotController` and `CameraStreamer` skip gRPC calls while `ConnectionState.DISCONNECTED`, avoiding wasted timeout cycles during network outages.
 - **Automatic retry** -- Transient gRPC errors (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED) are retried with exponential backoff. Non-retryable errors fail immediately.
 - **Unified response format** -- Every method returns `{"ok": True, ...}` or `{"ok": False, "error": "...", "retryable": ...}`.
 - **Name + ID resolver** -- Commands accept location/shelf names or IDs interchangeably. The resolver patches the upstream SDK to support both.
 - **Background camera streaming** -- `CameraStreamer` runs a daemon thread for continuous JPEG capture without blocking the main loop. Optional detection overlay draws bounding boxes on frames.
+- **Camera intrinsics + ToF** -- Query calibration parameters (focal length, principal point, distortion) for front/back/ToF cameras. Retrieve 16-bit ToF depth images.
 - **Object detection** -- `ObjectDetector` wraps the on-device detector (person, shelf, charger, door) and can annotate frames with bounding boxes via PIL.
+- **Transform streaming** -- `TransformStreamer` consumes the `GetDynamicTransform` server-streaming RPC with auto-reconnect and backoff, storing latest transforms for thread-safe retrieval.
 - **Enriched error messages** -- Failed commands include human-readable error descriptions fetched from the robot firmware.
-- **Map management** -- Export, import, and create maps from ROS-style PNG occupancy grids. `import_image_as_map` uses gRPC `stream_unary` directly for chunked image upload.
-- **MCP Server** -- 53 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
+- **Map management** -- Export, import, switch, and create maps from ROS-style PNG occupancy grids. `import_image_as_map` uses gRPC `stream_unary` directly for chunked image upload.
+- **Torch control** -- Set front/back LED torch intensity (0--255) for illumination.
+- **Laser scan** -- Activate on-demand LiDAR scans for a configurable duration.
+- **MCP Server** -- 66 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
 - **Skill document** -- A self-contained reference (`skills/kachaka-sdk/SKILL.md`) for development-time LLM agents.
 
 ## Tech Stack
 
 | Component | Version |
 |-----------|---------|
-| Python | >= 3.10 |
+| Python | >= 3.10, < 3.13 |
 | kachaka-api | >= 3.10 |
 | grpcio | >= 1.66 |
 | mcp[cli] | >= 1.0 |
+| Pillow | >= 10.0 |
 | pytest | >= 9.0 (dev) |
 | pytest-mock | >= 3.15 (dev) |
-| Build system | setuptools >= 68 |
+| Build system | setuptools >= 68 + setuptools-scm >= 8 |
 | Package manager | uv |
 
 ## Getting Started
 
 ### Prerequisites
 
-- Python 3.10 or later
+- Python 3.10--3.12
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - A Kachaka robot accessible on the network (default gRPC port: 26400)
 
@@ -91,7 +99,7 @@ graph TD
 #### Option A: Claude Code Plugin (recommended)
 
 ```bash
-/plugin marketplace add Sigma-Snaken/kachaka-sdk-toolkit
+/plugin marketplace add sigmarobotics/kachaka-sdk-toolkit
 /plugin install kachaka
 ```
 
@@ -147,11 +155,10 @@ cmds.speak("Hello, I have arrived")
 
 ### KachakaConnection
 
-Thread-safe, pooled gRPC connection manager with built-in timeout protection and connection monitoring.
+Thread-safe, pooled gRPC connection manager with built-in timeout protection, connection monitoring, and two-tier device-info caching.
 
 ```python
-from kachaka_core import KachakaConnection
-from kachaka_core.connection import ConnectionState
+from kachaka_core import KachakaConnection, ConnectionState
 
 conn = KachakaConnection.get("192.168.1.100")     # Get or create pooled connection
 conn = KachakaConnection.get("192.168.1.100:26400")  # Explicit port (same instance)
@@ -192,6 +199,15 @@ conn.stop_monitoring()
 
 Both `RobotController` and `CameraStreamer` can be wired to receive state change notifications via their `notify_state_change()` methods. When disconnected, they skip gRPC calls entirely instead of wasting 5 seconds per call on the interceptor timeout.
 
+#### Two-Tier Device-Info Cache
+
+Reduces redundant gRPC round-trips for data that rarely changes:
+
+| Tier | Data | Lifetime | Refresh |
+|------|------|----------|---------|
+| 1 (permanent) | serial, version, error_definitions | Never expires | Fetched once on first access |
+| 2 (semi-static) | shortcuts, map_list, current_map_id, map_image | Manual | Invalidated by `switch_map()` or explicit refresh |
+
 ### KachakaCommands
 
 Robot action commands. All methods return `dict` with an `ok` key. All are decorated with `@with_retry`.
@@ -208,12 +224,18 @@ Robot action commands. All methods return `dict` with an `ok` key. All are decor
 | `dock_shelf()` | Dock currently held shelf |
 | `undock_shelf()` | Undock currently held shelf |
 | `dock_any_shelf_with_registration(location, dock_forward)` | Move to location, dock any shelf there (auto-registers new shelves) |
+| `reset_shelf_pose(shelf_name)` | Reset recorded pose of a shelf |
 | `start_shortcut(shortcut_id)` | Execute a registered shortcut by ID |
+| `switch_map(map_id)` | Switch active map (invalidates Tier 2 cache) |
 | `export_map(map_id, output_path)` | Export map to binary file (Kachaka proprietary format) |
 | `import_map(file_path)` | Import a previously exported map backup |
-| `import_image_as_map(image_path, resolution, charger_x, charger_y, charger_theta)` | Import ROS-style PNG occupancy grid as a new map |
+| `import_image_as_map(image_path, resolution, ...)` | Import ROS-style PNG occupancy grid as a new map |
 | `speak(text)` | Text-to-speech |
 | `set_speaker_volume(volume)` | Set volume 0--10 (clamped) |
+| `set_front_torch(intensity)` | Set front LED torch intensity (0--255) |
+| `set_back_torch(intensity)` | Set back LED torch intensity (0--255) |
+| `activate_laser_scan(duration_sec)` | Activate on-demand LiDAR scan |
+| `set_auto_homing(enabled)` | Enable/disable automatic return-to-charger |
 | `cancel_command()` | Cancel running command |
 | `proceed()` | Resume a command waiting for confirmation |
 | `set_manual_control(enabled)` | Enable/disable velocity control mode |
@@ -237,6 +259,8 @@ Read-only status queries. All methods return `dict` with an `ok` key. All are de
 | `get_last_command_result()` | Result of most recently completed command |
 | `get_front_camera_image()` | Front camera JPEG as base64 |
 | `get_back_camera_image()` | Back camera JPEG as base64 |
+| `get_camera_intrinsics(camera)` | Calibration parameters for front/back/tof camera |
+| `get_tof_image()` | 16-bit ToF depth image (16UC1 encoding) |
 | `get_map()` | Current map as base64 PNG with metadata |
 | `list_maps()` | All available maps + current map ID |
 | `get_errors()` | Active error codes |
@@ -244,6 +268,10 @@ Read-only status queries. All methods return `dict` with an `ok` key. All are de
 | `get_serial_number()` | Robot serial number |
 | `get_version()` | Firmware version |
 | `get_speaker_volume()` | Current speaker volume (0--10) |
+| `get_auto_homing_enabled()` | Whether auto-homing is enabled |
+| `get_manual_control_enabled()` | Whether manual velocity control is active |
+| `is_ready()` | Non-blocking readiness check |
+| `get_static_transform()` | Static TF frames with quaternion-to-yaw conversion |
 | `list_shortcuts()` | All registered shortcuts |
 | `get_history()` | Command execution history |
 
@@ -311,6 +339,7 @@ detections = streamer.latest_detections
 | Property | Type | Description |
 |----------|------|-------------|
 | `latest_frame` | `dict \| None` | Most recent frame (thread-safe read) |
+| `latest_frame_bytes` | `bytes \| None` | Most recent raw JPEG bytes (no base64 encoding overhead) |
 | `latest_detections` | `list \| None` | Most recent detection results (requires `detect=True`) |
 | `is_running` | `bool` | Whether the capture thread is alive |
 | `stats` | `dict` | `{total_frames, dropped, drop_rate_pct, longest_gap_s, recovery_latency_ms}` |
@@ -326,6 +355,46 @@ detections = streamer.latest_detections
 - `stop()` on a non-running streamer is a no-op
 - **Disconnect-aware**: When `ConnectionState.DISCONNECTED`, the capture loop sleeps instead of attempting gRPC calls that would each waste 5 seconds on the interceptor timeout
 - **Recovery metrics**: Wire `streamer.notify_state_change` to `conn.start_monitoring()` to track `longest_gap_s` and `recovery_latency_ms` in `stats`
+
+## TransformStreamer
+
+Background daemon thread for streaming dynamic TF (coordinate frame) transforms via the `GetDynamicTransform` server-streaming RPC. Auto-reconnects with backoff on stream errors.
+
+```python
+from kachaka_core import KachakaConnection
+from kachaka_core.transform import TransformStreamer
+
+conn = KachakaConnection.get("192.168.1.100")
+streamer = TransformStreamer(conn)
+streamer.start()
+
+# Thread-safe snapshot of latest transforms
+transforms = streamer.latest_transforms
+# {"base_link": {"frame_id": "map", "child_frame_id": "base_link",
+#   "translation": {"x": 1.2, "y": 0.5, "z": 0.0},
+#   "rotation": {"x": 0, "y": 0, "z": 0.1, "w": 0.99},
+#   "theta": 0.2, "stamp_nsec": 1234567890}, ...}
+
+print(streamer.stats)
+# {"total_updates": 150, "errors": 0, "last_update_time": 1711800000.0}
+
+streamer.stop()
+```
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `latest_transforms` | `dict` | Latest transform per child frame (thread-safe) |
+| `is_running` | `bool` | Whether the streaming thread is alive |
+| `stats` | `dict` | `{total_updates, errors, last_update_time}` |
+
+### Design Notes
+
+- Consumes server-streaming RPC (long-lived connection, push-based)
+- Quaternion rotation is automatically converted to `theta` (yaw) for convenience
+- On stream error, reconnects with exponential backoff
+- Daemon thread -- auto-exits when the process ends
 
 ## RobotController
 
@@ -384,10 +453,6 @@ ctrl = RobotController(
 
 ### Command Execution Flow
 
-The following sequence diagram shows the full `_execute_command` internal flow, which
-underlies every high-level command method (`move_to_location`, `return_home`,
-`move_shelf`, `return_shelf`).
-
 ```mermaid
 sequenceDiagram
     participant Controller
@@ -405,7 +470,7 @@ sequenceDiagram
         end
         alt result.success == false
             Controller->>Controller: get_robot_error_code(result)
-            Note right of Controller: Return error immediately<br/>(no polling needed)
+            Note right of Controller: Return error immediately
         end
     end
 
@@ -420,7 +485,6 @@ sequenceDiagram
                 Note right of Controller: Continue polling
             end
         end
-        Note over Controller: If 5s pass without confirmation:<br/>log warning but continue anyway
     end
 
     rect rgb(230, 255, 230)
@@ -430,21 +494,14 @@ sequenceDiagram
             Note right of Controller: Measure RTT for metrics
             Robot-->>Controller: state (command_id, state)
             alt State leaves RUNNING/PENDING OR command_id changes
-                Note over Controller, Robot: Completion detected
-                loop Retry
-                    Controller->>Robot: GetLastCommandResult()
-                    Robot-->>Controller: result (command_id, success, error_code)
-                end
-                alt result.command_id == our_command_id AND success
+                Controller->>Robot: GetLastCommandResult()
+                Robot-->>Controller: result with command_id
+                alt result.command_id matches AND success
                     Note right of Controller: Return ok
-                else result.command_id == our_command_id AND failure
+                else result.command_id matches AND failure
                     Controller->>Controller: get_robot_error_code(result)
                     Note right of Controller: Return error with description
-                else result.command_id != our_command_id
-                    Note right of Controller: Mismatch — continue polling<br/>(our command might still be pending)
                 end
-            else Still RUNNING or PENDING
-                Note right of Controller: Continue polling
             end
         end
     end
@@ -455,16 +512,11 @@ sequenceDiagram
     end
 ```
 
-**Racing and concurrency notes:**
+**Concurrency notes:**
 
-- **Command preemption**: If Command B is issued while Command A is still running,
-  the robot cancels A. Command A's polling loop will see a completion with
-  `error_code=10001` (command cancelled). When two callers race, the loser
-  typically gets a `TIMEOUT` because its `command_id` is never reported as the
-  current command.
-- **Not thread-safe**: `_execute_command` is **not** thread-safe. Callers must
-  serialise command execution externally (e.g. with a lock or sequential task queue).
-- **Disconnect-aware**: The background `_state_loop` skips gRPC calls while `ConnectionState.DISCONNECTED`, avoiding wasted timeout cycles. Wire `ctrl.notify_state_change` to `conn.start_monitoring()` to enable this behavior.
+- **Command preemption**: If Command B is issued while Command A is still running, the robot cancels A. Command A receives `error_code=10001` (interrupted).
+- **Not thread-safe**: `_execute_command` is **not** thread-safe. Callers must serialise command execution externally.
+- **Disconnect-aware**: The background `_state_loop` skips gRPC calls while `ConnectionState.DISCONNECTED`.
 
 ## ObjectDetector
 
@@ -512,7 +564,7 @@ annotated = det.annotate_frame(raw, result["objects"])
 
 ## MCP Server
 
-The MCP Server exposes 53 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
+The MCP Server exposes 66 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
 
 ### Running the Server
 
@@ -551,7 +603,7 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `ping_robot` | Test connectivity, return serial + pose |
 | `disconnect_robot` | Remove from connection pool |
 
-#### Status Queries (6 tools)
+#### Status Queries (5 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -560,7 +612,6 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `get_battery` | Battery percentage + charging status |
 | `get_errors` | Active error codes |
 | `get_robot_info` | Serial number + firmware version |
-| `get_command_state` | Whether a command is running |
 
 #### Locations and Shelves (3 tools)
 
@@ -591,6 +642,20 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `dock_any_shelf_with_registration` | Move to location, dock any shelf (auto-registers new) |
 | `reset_shelf_pose` | Reset recorded pose of a shelf |
 
+#### Controller (7 tools)
+
+The controller tools expose `RobotController` through the MCP server, providing background state polling and command-ID-verified execution for multi-step patrols. `start_controller` must be called before any other controller tool.
+
+| Tool | Description |
+|------|-------------|
+| `start_controller` | Start background state polling (idempotent) |
+| `stop_controller` | Stop and remove controller |
+| `get_controller_state` | Full state snapshot (pose, battery, shelf, command) |
+| `controller_move_to_location` | Move to location via controller |
+| `controller_move_shelf` | Move shelf via controller (auto-starts shelf monitor) |
+| `controller_return_shelf` | Return shelf via controller (auto-stops shelf monitor) |
+| `controller_dock_any_shelf` | Dock any shelf at location via controller (auto-registers new) |
+
 #### Speech (3 tools)
 
 | Tool | Description |
@@ -599,23 +664,26 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `set_volume` | Set speaker volume (0--10) |
 | `get_volume` | Get current volume |
 
-#### Command Control (2 tools)
+#### Command Control (3 tools)
 
 | Tool | Description |
 |------|-------------|
 | `cancel_command` | Cancel running command |
+| `get_command_state` | Whether a command is running |
 | `get_last_result` | Result of last completed command |
 
-#### Camera (6 tools)
+#### Camera (8 tools)
 
 | Tool | Description |
 |------|-------------|
-| `capture_front_camera` | Single JPEG from front camera (base64) |
-| `capture_back_camera` | Single JPEG from back camera (base64) |
+| `capture_front_camera` | Single JPEG from front camera (base64 or save to file) |
+| `capture_back_camera` | Single JPEG from back camera (base64 or save to file) |
 | `start_camera_stream` | Start background capture (options: `detect`, `annotate`) |
 | `get_camera_frame` | Get latest frame from stream |
 | `stop_camera_stream` | Stop background capture |
 | `get_camera_stats` | Stream statistics (frames, drops) |
+| `get_camera_intrinsics` | Camera calibration parameters (front/back/tof) |
+| `get_tof_image` | 16-bit ToF depth image |
 
 #### Object Detection (2 tools)
 
@@ -624,42 +692,67 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `get_object_detection` | Detect objects (person, shelf, charger, door) with scores + distances |
 | `capture_with_detection` | Camera capture with detection overlay (bounding boxes) |
 
-#### Controller (7 tools)
-
-The controller tools expose `RobotController` through the MCP server, providing background state polling and command-ID-verified execution for multi-step patrols. They follow the same lifecycle pattern as the camera streaming tools: `start_controller` must be called before any other controller tool.
-
-| Tool | Description |
-|------|-------------|
-| `start_controller` | Start background state polling (idempotent) |
-| `stop_controller` | Stop and remove controller |
-| `get_controller_state` | Full state snapshot (pose, battery, shelf, command) |
-| `controller_move_shelf` | Move shelf via controller (auto-starts shelf monitor) |
-| `controller_return_shelf` | Return shelf via controller (auto-stops shelf monitor) |
-| `controller_move_to_location` | Move to location via controller |
-| `controller_dock_any_shelf` | Dock any shelf at location via controller (auto-registers new) |
-
-All controller action tools return `{"ok": False, "error": "controller not started"}` when no controller exists for the given IP. The controller must be started first with `start_controller`.
-
-#### Map (5 tools)
+#### Map (6 tools)
 
 | Tool | Description |
 |------|-------------|
 | `get_map` | Current map as base64 PNG |
 | `list_maps` | All maps + current map ID |
+| `switch_map` | Switch active map (invalidates Tier 2 cache) |
 | `export_map` | Export map to binary file (Kachaka proprietary format) |
 | `import_map` | Import previously exported map backup |
 | `import_image_as_map` | Import ROS-style PNG occupancy grid as a new map |
 
-#### Other (6 tools)
+#### Shortcuts and History (3 tools)
 
 | Tool | Description |
 |------|-------------|
 | `list_shortcuts` | All registered shortcuts |
 | `start_shortcut` | Execute a registered shortcut by ID |
 | `get_history` | Command execution history |
+
+#### Manual Control (3 tools)
+
+| Tool | Description |
+|------|-------------|
 | `enable_manual_control` | Enable/disable velocity mode |
 | `set_velocity` | Set linear + angular velocity |
 | `emergency_stop` | Immediately stop robot |
+
+#### Torch / Lighting (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `set_front_torch` | Set front LED torch intensity (0--255) |
+| `set_back_torch` | Set back LED torch intensity (0--255) |
+
+#### Laser Scan (1 tool)
+
+| Tool | Description |
+|------|-------------|
+| `activate_laser_scan` | Activate on-demand LiDAR scan for a configurable duration |
+
+#### Auto Homing (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `set_auto_homing` | Enable/disable automatic return-to-charger |
+| `get_auto_homing` | Query auto-homing status |
+
+#### Readiness (1 tool)
+
+| Tool | Description |
+|------|-------------|
+| `is_ready` | Non-blocking readiness check |
+
+#### Transforms (4 tools)
+
+| Tool | Description |
+|------|-------------|
+| `get_static_transform` | Static TF frames (one-shot query) |
+| `start_transform_stream` | Start background dynamic TF streaming |
+| `get_dynamic_transform` | Get latest dynamic transforms from stream |
+| `stop_transform_stream` | Stop transform streaming |
 
 ## Error Handling
 
@@ -761,13 +854,13 @@ sequenceDiagram
 
 | Layer | Component | Behaviour | Timing |
 |-------|-----------|-----------|--------|
-| 1 | `TimeoutInterceptor` | Injects 5s deadline on all unary calls | Fires at exactly deadline ±6ms |
-| 2 | `@with_retry` | Retries UNAVAILABLE/DEADLINE_EXCEEDED with exponential backoff | 3 attempts default, or wall-clock deadline mode |
+| 1 | `TimeoutInterceptor` | Injects 5s deadline on all unary calls | Fires at exactly deadline |
+| 2 | `@with_retry` | Retries UNAVAILABLE/DEADLINE_EXCEEDED with exponential backoff | 3 attempts default |
 | 3 | `ConnectionState` monitoring | Background ping detects disconnect | ~7s (ping interval + timeout) |
 | 4 | `RobotController._state_loop` | Skips polling during DISCONNECTED | Immediate resume on CONNECTED |
 | 5 | `CameraStreamer._run` | Skips capture during DISCONNECTED | Immediate resume on CONNECTED |
 
-The gRPC channel itself survives all disconnect types (client-side packet loss, server-side disconnection) and does not require rebuilding. Recovery is automatic once the network path is restored.
+The gRPC channel itself survives all disconnect types and does not require rebuilding. Recovery is automatic once the network path is restored.
 
 ## Testing
 
@@ -794,16 +887,17 @@ pytest tests/test_commands.py::TestRetry
 
 | Module | Tests | Covers |
 |--------|-------|--------|
-| `test_connection.py` | 22 | Pool management, normalisation, ping, resolver, monitoring, ConnectionState |
-| `test_commands.py` | 27 | Movement, shelf ops, speech, shortcuts, map management, retry, cancel, stop, polling |
-| `test_queries.py` | 13 | Status, locations, shelves, camera, map, errors, info |
-| `test_error_handling.py` | 13 | Retry modes (count + deadline), backoff, non-retryable errors |
-| `test_interceptors.py` | 6 | TimeoutInterceptor default deadline injection, passthrough |
-| `test_camera.py` | 30 | Lifecycle, capture, stats, errors, callbacks, thread safety, disconnect skip, recovery metrics |
-| `test_controller.py` | 48 | State polling, command execution, metrics, move/shelf/return/dock, racing conditions, disconnect handling |
-| `test_detection.py` | 14 | Detections, capture+detect, annotation, label mapping, error handling |
-| `test_server_controller.py` | 9 | MCP controller tools: start/stop lifecycle, idempotency, state dict, error handling |
-| **Total** | **182** | |
+| `test_connection.py` | Connection pool, normalisation, ping, resolver, monitoring, caching |
+| `test_commands.py` | Movement, shelf ops, speech, shortcuts, map, torch, laser, retry, cancel, stop |
+| `test_queries.py` | Status, locations, shelves, camera, intrinsics, ToF, map, errors, info |
+| `test_error_handling.py` | Retry modes (count + deadline), backoff, non-retryable errors |
+| `test_interceptors.py` | TimeoutInterceptor default deadline injection, passthrough |
+| `test_camera.py` | Lifecycle, capture, stats, errors, callbacks, thread safety, disconnect skip |
+| `test_controller.py` | State polling, command execution, metrics, racing conditions, disconnect handling |
+| `test_detection.py` | Detections, capture+detect, annotation, label mapping, error handling |
+| `test_server_controller.py` | MCP controller tools: start/stop lifecycle, idempotency, state dict |
+| `test_transform.py` | TransformStreamer lifecycle, auto-reconnect, stats, thread safety |
+| **Total** | **239 tests** |
 
 All tests use the `_clean_pool` autouse fixture to ensure isolation between tests.
 
@@ -815,19 +909,20 @@ graph LR
 
     subgraph core["kachaka_core/ — Shared core library"]
         C_INIT["__init__.py — Public exports"]
-        C_CONN["connection.py — Thread-safe pooled gRPC + monitoring"]
+        C_CONN["connection.py — Thread-safe pooled gRPC + monitoring + cache"]
         C_INT["interceptors.py — TimeoutInterceptor (5s default)"]
-        C_CMD["commands.py — Movement, shelf, speech, map mgmt, manual"]
-        C_QRY["queries.py — Status, camera, map queries"]
+        C_CMD["commands.py — Movement, shelf, speech, torch, laser, map"]
+        C_QRY["queries.py — Status, camera intrinsics, ToF, map queries"]
         C_CAM["camera.py — CameraStreamer daemon thread"]
         C_CTRL["controller.py — RobotController + polling"]
         C_DET["detection.py — ObjectDetector + annotation"]
+        C_TF["transform.py — TransformStreamer (dynamic TF)"]
         C_ERR["error_handling.py — @with_retry"]
     end
 
     subgraph mcp["mcp_server/ — MCP Server layer"]
         M_INIT["__init__.py"]
-        M_SRV["server.py — 53 tools, stdio transport"]
+        M_SRV["server.py — 66 tools, stdio transport"]
     end
 
     subgraph skills["skills/kachaka-sdk/ — Plugin skill"]
@@ -839,7 +934,7 @@ graph LR
         P_JSON["plugin.json"]
     end
 
-    subgraph tests["tests/ — pytest suite (182 tests)"]
+    subgraph tests["tests/ — pytest suite (239 tests)"]
         T_CONN["test_connection.py"]
         T_CMD["test_commands.py"]
         T_QRY["test_queries.py"]
@@ -849,11 +944,16 @@ graph LR
         T_CTRL["test_controller.py"]
         T_DET["test_detection.py"]
         T_SCTRL["test_server_controller.py"]
+        T_TF["test_transform.py"]
     end
 
     subgraph cli["kachaka_sdk_toolkit/ — Setup CLI"]
         CLI_INIT["__init__.py"]
         CLI_SETUP["setup_cli.py — kachaka-setup command"]
+    end
+
+    subgraph examples["examples/"]
+        EX_CAM["camera_web.py — FastAPI MJPEG viewer"]
     end
 
     ROOT --- core
@@ -862,6 +962,7 @@ graph LR
     ROOT --- plugin
     ROOT --- tests
     ROOT --- cli
+    ROOT --- examples
     ROOT --- MCP_JSON[".mcp.json"]
     ROOT --- TOML["pyproject.toml"]
 ```
@@ -877,28 +978,24 @@ graph LR
 | Hard-code robot IP | Pass as parameter or env var |
 | Ignore `result["ok"]` | Always check before proceeding |
 | Call `sdk.move_to_location()` raw | Use `cmds.move_to_location()` (handles resolver) |
+| Use `KachakaCommands` for patrol sequences | Use `RobotController` for multi-step patrols with metrics |
 
 ## Design Caveats
 
 ### Caveat 1: Non-blocking Command Execution (`wait_for_completion=False`)
 
-The upstream `kachaka-api` SDK provides a `wait_for_completion` parameter (default `True`) on all action commands (`move_to_location`, `move_shelf`, `speak`, etc.). When enabled, the SDK internally holds open a gRPC streaming call to `GetLastCommandResult` until the command finishes.
+The upstream `kachaka-api` SDK provides a `wait_for_completion` parameter (default `True`) on all action commands. When enabled, the SDK internally holds open a gRPC streaming call until the command finishes.
 
 **This is convenient for quick testing but dangerous in production.**
 
-When the robot moves to an area with poor WiFi (warehouse interiors, near elevators, between metal shelving), the gRPC connection does not fail immediately — it silently blocks. In real-world testing, a single gRPC call was observed blocking for **522 seconds** before timing out. During this period:
-
-- The main thread is completely deadlocked — no new commands can be sent
-- `cancel_command()` cannot be called
-- Robot state (battery, pose, errors) cannot be read
-- If running a patrol schedule, the entire scheduler stalls
+When the robot moves to an area with poor WiFi, the gRPC connection does not fail immediately -- it silently blocks. In real-world testing, a single gRPC call was observed blocking for **522 seconds** before timing out. During this period, the main thread is completely deadlocked.
 
 **kachaka_core always uses `wait_for_completion=False`** and manages command lifecycle through its own mechanisms:
 
 ```mermaid
 graph LR
     subgraph "kachaka-api SDK (dangerous in production)"
-        A["sdk.move_to_location(id)"] -->|"wait_for_completion=True (default)"| B["gRPC streaming blocks\nuntil command completes"]
+        A["sdk.move_to_location(id)"] -->|"wait_for_completion=True"| B["gRPC streaming blocks\nuntil command completes"]
         B -->|"WiFi drops"| C["Blocks 500+ seconds\nMain thread deadlocked"]
     end
 
@@ -914,27 +1011,15 @@ The three layers of protection:
 
 | Layer | Component | What It Does |
 |-------|-----------|-------------|
-| 1 | `TimeoutInterceptor` | Injects a 5-second deadline on every gRPC call, preventing any single call from blocking more than 5 seconds |
-| 2 | `KachakaCommands.poll_until_complete()` | Polls `is_command_running()` every 0.5s with a configurable timeout — each poll is independently protected by the interceptor |
-| 3 | `RobotController._execute_command()` | Captures `command_id` from `StartCommand`, polls `GetCommandState` with `command_id` verification, and uses `GetLastCommandResult` with `command_id` matching to confirm the result belongs to our command |
-
-**If you use `kachaka-api` SDK directly instead of `kachaka_core`:**
-
-```python
-# DANGEROUS — can block for 500+ seconds in production
-result = sdk.move_to_location(location_id)
-
-# SAFE — returns immediately, poll separately
-result = sdk.move_to_location(location_id, wait_for_completion=False)
-```
+| 1 | `TimeoutInterceptor` | Injects a 5-second deadline on every gRPC call |
+| 2 | `KachakaCommands.poll_until_complete()` | Polls `is_command_running()` every 0.5s with a configurable timeout |
+| 3 | `RobotController._execute_command()` | Captures `command_id`, polls with verification, confirms result belongs to our command |
 
 ### Caveat 2: Shelf Drop Detection Limitations
 
-The Kachaka API **does not provide a native event or callback for shelf drops** (when the robot loses grip on a shelf during transport). There is no `ShelfDropEvent` streaming RPC, no error code emitted at drop time, and no webhook mechanism. If a shelf falls off during transit, the API does not proactively notify anyone.
+The Kachaka API **does not provide a native event or callback for shelf drops**. There is no `ShelfDropEvent` streaming RPC, no error code emitted at drop time, and no webhook mechanism.
 
-**Why this matters:** An undetected shelf drop leaves furniture blocking a hallway or doorway, potentially obstructing other robots, disrupting navigation paths, or creating safety hazards.
-
-**kachaka_core's approximation:** `RobotController` implements polling-based shelf drop detection in its background thread:
+**kachaka_core's approximation:** `RobotController` implements polling-based shelf drop detection:
 
 ```mermaid
 sequenceDiagram
@@ -953,7 +1038,7 @@ sequenceDiagram
             BG->>State: moving_shelf_id = shelf_id
         else shelf_id == "" AND _shelf_confirmed_docked == True
             BG->>State: shelf_dropped = True
-            Note over State: Drop detected!<br/>Application must poll<br/>get_controller_state()
+            Note over State: Drop detected!
         end
     end
 
@@ -964,33 +1049,10 @@ sequenceDiagram
 
 | Limitation | Detail |
 |-----------|--------|
-| **Detection delay** | Up to `fast_interval` seconds (default 1s) between drop occurrence and detection |
-| **RobotController only** | Requires a background thread — not available in `KachakaCommands` (which has no background thread) |
-| **No MCP push notification** | MCP is request-response; the server cannot push a shelf drop alert to Claude. The `shelf_dropped` flag is only visible when the client calls `get_controller_state()` |
-| **Dock-phase false positive** | During the dock phase of `move_shelf`, `moving_shelf_id` is empty before the shelf is picked up. Without protection, this would trigger a false drop. Mitigated by the `_shelf_confirmed_docked` flag — drop detection only activates after the shelf ID first appears |
-| **No automatic cancellation** | Detecting a drop does not cancel the running command. The application layer must read `shelf_dropped=True` and decide whether to call `cancel_command()` |
-
-**Recommended application-layer handling:**
-
-```python
-ctrl = RobotController(conn)
-ctrl.start()
-
-result = ctrl.move_shelf("ShelfA", "Room1")
-
-# Check after command completes
-state = ctrl.state
-if state.shelf_dropped:
-    print("WARNING: Shelf was dropped during transport!")
-    # Application decides: re-dock, notify operator, log event, etc.
-```
-
-**What would improve this:** If Kachaka firmware adds any of the following, detection quality would improve significantly:
-- A `ShelfDropEvent` streaming RPC or callback
-- A shelf-drop error code in `GetRobotError` / `GetCommandState`
-- A `shelf_status` field in `GetCommandState` responses
-
-Until then, polling `get_moving_shelf_id()` in a background thread is the best available approach.
+| Detection delay | Up to `fast_interval` seconds (default 1s) between drop and detection |
+| RobotController only | Not available in `KachakaCommands` (no background thread) |
+| No MCP push notification | MCP is request-response; `shelf_dropped` only visible via `get_controller_state()` |
+| No automatic cancellation | Application must read `shelf_dropped=True` and decide whether to cancel |
 
 ## Adding New Functionality
 

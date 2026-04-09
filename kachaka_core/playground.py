@@ -2,15 +2,17 @@
 
 Provides upload, run, stop, log, and status management for Python scripts
 running inside the robot's on-board Docker container.
+
+Uses subprocess (ssh/scp) instead of asyncssh to avoid event-loop conflicts
+when running inside MCP server frameworks (anyio / FastMCP).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
-
-import asyncssh
+import shlex
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -30,60 +32,56 @@ class PlaygroundSSH:
     USER = "kachaka"
     SCRIPT_DIR = "/home/kachaka"
 
+    _SSH_OPTS = [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
+        "-o", "ConnectTimeout=10",
+    ]
+
     @staticmethod
-    async def _connect(ip: str) -> asyncssh.SSHClientConnection:
-        """Open an SSH connection using agent -> key file fallback chain.
-
-        Auth order:
-        1. SSH agent
-        2. ~/.ssh/id_ed25519
-        3. ~/.ssh/id_rsa
-        4. Raise ConnectionError with setup instructions
-        """
-        base_kwargs = dict(
-            host=ip,
-            port=PlaygroundSSH.PORT,
-            username=PlaygroundSSH.USER,
-            known_hosts=None,
-        )
-
-        # 1. Try SSH agent
-        try:
-            return await asyncssh.connect(**base_kwargs)
-        except (OSError, asyncssh.Error) as exc:
-            logger.debug("SSH agent failed: %s", exc)
-
-        # 2-3. Try key files
-        key_paths = [
-            Path.home() / ".ssh" / "id_ed25519",
-            Path.home() / ".ssh" / "id_rsa",
+    def _ssh_base(ip: str) -> list[str]:
+        """Build the common ssh command prefix."""
+        return [
+            "ssh", *PlaygroundSSH._SSH_OPTS,
+            "-p", str(PlaygroundSSH.PORT),
+            f"{PlaygroundSSH.USER}@{ip}",
         ]
-        for key_path in key_paths:
-            if key_path.exists():
-                try:
-                    return await asyncssh.connect(
-                        **base_kwargs,
-                        client_keys=[str(key_path)],
-                        agent_path=None,
-                    )
-                except (OSError, asyncssh.Error) as exc:
-                    logger.debug("Key %s failed: %s", key_path, exc)
 
-        # 4. All methods exhausted
-        raise ConnectionError(_SSH_SETUP_HINT.format(ip=ip))
+    @staticmethod
+    async def _run_cmd(
+        cmd: list[str], *, stdin_data: bytes | None = None,
+    ) -> tuple[int, str, str]:
+        """Run a command via asyncio.create_subprocess_exec."""
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE if stdin_data else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, stderr_bytes = await proc.communicate(input=stdin_data)
+        return (
+            proc.returncode or 0,
+            stdout_bytes.decode(errors="replace"),
+            stderr_bytes.decode(errors="replace"),
+        )
 
     @staticmethod
     async def upload(
         ip: str, script_content: str, filename: str = "script.py",
     ) -> dict:
-        """Upload a Python script to the Playground container via SFTP."""
+        """Upload a Python script to the Playground container via ssh pipe."""
         remote_path = f"{PlaygroundSSH.SCRIPT_DIR}/{filename}"
+        cmd = [
+            *PlaygroundSSH._ssh_base(ip),
+            f"cat > {shlex.quote(remote_path)}",
+        ]
         try:
-            conn = await PlaygroundSSH._connect(ip)
-            async with conn:
-                async with conn.start_sftp_client() as sftp:
-                    async with sftp.open(remote_path, "w") as f:
-                        await f.write(script_content)
+            rc, _, stderr = await PlaygroundSSH._run_cmd(
+                cmd, stdin_data=script_content.encode(),
+            )
+            if rc != 0:
+                raise RuntimeError(stderr.strip() or f"ssh exit code {rc}")
             return {"ok": True, "path": remote_path}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -96,16 +94,17 @@ class PlaygroundSSH:
     ) -> dict:
         """Start a script in background via nohup."""
         script_path = f"{PlaygroundSSH.SCRIPT_DIR}/{filename}"
-        cmd = (
-            f"nohup python3 -u {script_path} > {log_path} 2>&1 & "
-            f"echo $!"
+        remote_cmd = (
+            f"nohup python3 -u {script_path} > {log_path} 2>&1 & echo $!"
         )
         try:
-            conn = await PlaygroundSSH._connect(ip)
-            async with conn:
-                result = await conn.run(cmd, check=False)
-                pid_str = result.stdout.strip()
-                pid = int(pid_str) if pid_str.isdigit() else None
+            rc, stdout, stderr = await PlaygroundSSH._run_cmd(
+                [*PlaygroundSSH._ssh_base(ip), remote_cmd],
+            )
+            if rc != 0:
+                raise RuntimeError(stderr.strip() or f"ssh exit code {rc}")
+            pid_str = stdout.strip()
+            pid = int(pid_str) if pid_str.isdigit() else None
             return {"ok": True, "pid": pid, "log_path": log_path}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -114,13 +113,11 @@ class PlaygroundSSH:
     async def stop(ip: str, filename: str = "script.py") -> dict:
         """Stop a running script (pkill -f)."""
         try:
-            conn = await PlaygroundSSH._connect(ip)
-            async with conn:
-                result = await conn.run(
-                    f"pkill -f 'python3.*{filename}'", check=False,
-                )
-            stopped = result.returncode == 0
-            return {"ok": True, "stopped": stopped}
+            rc, _, _ = await PlaygroundSSH._run_cmd(
+                [*PlaygroundSSH._ssh_base(ip),
+                 f"pkill -f 'python3.*{filename}'"],
+            )
+            return {"ok": True, "stopped": rc == 0}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -132,18 +129,16 @@ class PlaygroundSSH:
     ) -> dict:
         """Read the tail of a script log file."""
         try:
-            conn = await PlaygroundSSH._connect(ip)
-            async with conn:
-                result = await conn.run(
-                    f"tail -n {tail_lines} {log_path}", check=False,
-                )
-            if result.returncode != 0:
+            rc, stdout, _ = await PlaygroundSSH._run_cmd(
+                [*PlaygroundSSH._ssh_base(ip),
+                 f"tail -n {tail_lines} {log_path}"],
+            )
+            if rc != 0:
                 return {"ok": False, "error": f"Log not found: {log_path}"}
-            text = result.stdout
             return {
                 "ok": True,
-                "lines": text,
-                "line_count": len(text.strip().splitlines()),
+                "lines": stdout,
+                "line_count": len(stdout.strip().splitlines()),
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -152,13 +147,12 @@ class PlaygroundSSH:
     async def status(ip: str, filename: str = "script.py") -> dict:
         """Check if a script is currently running."""
         try:
-            conn = await PlaygroundSSH._connect(ip)
-            async with conn:
-                result = await conn.run(
-                    f"pgrep -f 'python3.*{filename}'", check=False,
-                )
-            pid_str = result.stdout.strip()
-            if result.returncode == 0 and pid_str:
+            rc, stdout, _ = await PlaygroundSSH._run_cmd(
+                [*PlaygroundSSH._ssh_base(ip),
+                 f"pgrep -f 'python3.*{filename}'"],
+            )
+            pid_str = stdout.strip()
+            if rc == 0 and pid_str:
                 pid = int(pid_str.splitlines()[0])
                 return {"ok": True, "running": True, "pid": pid}
             return {"ok": True, "running": False}
