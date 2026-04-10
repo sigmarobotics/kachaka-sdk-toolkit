@@ -724,11 +724,52 @@ Run scripts directly on the robot's on-board Docker container (Playground).
 Scripts use `kachaka_api` (the raw SDK) — NOT `kachaka_core` — because the
 container has only the pre-installed SDK.
 
-### When to Use
+### Why Playground Exists — Offline-First Robot Control
 
-- Factory/warehouse with unreliable WiFi — script runs offline after deployment
-- Multi-stop routes that must survive network drops
-- Long-running autonomous tasks (patrol, inspection, delivery)
+Normal mode: your script runs on an external machine and sends gRPC commands
+to the robot **over WiFi**. If WiFi drops, the robot stops receiving commands.
+
+Playground mode: your script runs **inside the robot's Docker container**.
+Commands travel through a container-internal virtual network (`100.94.1.1:26400`),
+**never touching WiFi**. The robot can walk into a zero-connectivity zone and
+keep executing the full route autonomously.
+
+```
+Normal mode:  [Your PC] ──WiFi──► [Robot gRPC]    ← WiFi断 = 機器人停止
+Playground:   [Robot Container] ──internal──► [Robot gRPC]  ← 完全不需WiFi
+```
+
+### When to Use Playground (vs. kachaka_core)
+
+| Situation | Use | Why |
+|-----------|-----|-----|
+| Robot stays in WiFi range | `kachaka_core` (normal) | Real-time control, richer API, easier debugging |
+| Route passes through WiFi dead zones | **Playground** | Script survives network loss — runs on-board |
+| Factory/warehouse with unreliable WiFi | **Playground** | Cannot guarantee connectivity during movement |
+| Long-running autonomous task (>30 min) | **Playground** | Even brief WiFi drops can abort `kachaka_core` commands |
+| Need operator confirmation without network | **Playground + IMU** | Physical shake replaces network-based confirmation |
+| Need real-time dashboard or camera stream | `kachaka_core` (normal) | Playground cannot push data out without WiFi |
+
+**Decision rule**: If the robot must travel to any location where WiFi may be
+unavailable — even for a few seconds during movement — use Playground.
+
+### How It Works
+
+1. **Deploy phase (requires WiFi)**: Upload script to robot via SSH (:26500) or MCP `playground_upload`
+2. **Execute phase (no WiFi needed)**: Script runs inside the container, all gRPC calls go through `100.94.1.1:26400` (container ↔ host internal bridge, never touches WiFi)
+3. **Report phase (optional, best-effort)**: If WiFi exists, script can POST progress to external server; if not, silently skips
+
+### Key Differences from kachaka_core Scripts
+
+| | kachaka_core (normal) | Playground (offline) |
+|---|---|---|
+| Runs on | Your PC / server | Robot's Docker container |
+| Network | WiFi to robot :26400 | Internal `100.94.1.1:26400` |
+| SDK | `kachaka_core` (pooled, retry, monitoring) | `kachaka_api` (raw SDK, pre-installed) |
+| Resolver | `KachakaConnection` owns it, auto-init | Must call `client.update_resolver()` manually |
+| Libraries | Any pip package | stdlib only (no pip in container) |
+| WiFi required | Yes, throughout execution | Only for deploy; execution is offline |
+| Operator interaction | Network-based (API, WebSocket, etc.) | Physical: IMU shake detection |
 
 ### SSH Key Setup (Prerequisites)
 
@@ -965,3 +1006,39 @@ log.info("Done")
 | Location patrol (no shelf) | 1 + 2 + 4 |
 | Photo capture then batch return | 1 + 3 (replace shake wait with `client.get_front_camera_image()` + collect, then upload after route) |
 | Stationary shake trigger | 1 + 2 (arm immediately, wait for event) |
+
+### Complete Example: Offline Multi-Stop Route
+
+See `examples/playground_offline_route.py` for a production-verified script that combines
+all building blocks into a complete offline delivery workflow.
+
+**What it demonstrates:**
+
+- Multi-stop shelf delivery with configurable stop list
+- IMU shake detection (2-of-3 sample voting, arm/disarm gating around movement)
+- Optional HTTP progress reporting to an external server (e.g. Pi dashboard)
+- Graceful error recovery (returns shelf + goes home on any failure)
+- Background IMU thread with clean shutdown via `threading.Event`
+
+**Key design decisions (verified on real robot BKP40HD1T):**
+
+| Decision | Reason |
+|----------|--------|
+| `settle_delay=2.0` before arming IMU | Dock/undock impacts reach 13+ m/s² — must wait for robot to stop |
+| Dual indicator: accel OR gyro | Accel=10.31 alone missed some shakes; gyro=0.945 caught them |
+| 2-of-3 sample voting | Filters single-sample noise without adding latency |
+| `try_report()` with `retries=60` on completion | 10-minute retry window for network recovery after offline route |
+| `client.update_resolver()` at startup | Names sent as raw strings cause error_code 10250 without resolver |
+
+**Deployment:**
+
+```bash
+# Upload and run via MCP tools (preferred)
+playground_upload(ip, script_content, "offline_route.py")
+playground_run(ip, "offline_route.py")
+playground_log(ip)
+
+# Or via SSH directly
+scp -P 26500 playground_offline_route.py kachaka@<robot-ip>:/home/kachaka/
+ssh -p 26500 kachaka@<robot-ip> "nohup python3 -u /home/kachaka/playground_offline_route.py > /tmp/route.log 2>&1 &"
+```

@@ -754,6 +754,78 @@ The controller tools expose `RobotController` through the MCP server, providing 
 | `get_dynamic_transform` | Get latest dynamic transforms from stream |
 | `stop_transform_stream` | Stop transform streaming |
 
+## Playground Offline Execution
+
+Run scripts directly on the robot's on-board Docker container (Playground) for autonomous operation without network dependency. Scripts use `kachaka_api` (the raw SDK) -- not `kachaka_core` -- because the container only has the pre-installed SDK.
+
+### Why Playground -- Offline-First Robot Control
+
+In normal mode, your script runs on an external machine and sends gRPC commands to the robot **over WiFi**. If WiFi drops mid-route, the robot stops receiving commands. In Playground mode, the script runs **inside the robot's Docker container** and commands travel through a container-internal virtual network (`100.94.1.1:26400`) that never touches WiFi. The robot can walk into a zero-connectivity zone and keep executing autonomously.
+
+```mermaid
+graph LR
+    subgraph normal["Normal Mode (WiFi required)"]
+        PC["Your PC"] -->|"WiFi → :26400"| R1["Robot gRPC"]
+    end
+
+    subgraph playground["Playground Mode (offline)"]
+        CONT["Robot Container"] -->|"100.94.1.1:26400<br/>(internal bridge)"| R2["Robot gRPC"]
+    end
+
+    style normal fill:#fff3e0
+    style playground fill:#e8f5e9
+```
+
+### When to Use Playground vs. kachaka_core
+
+| Situation | Recommended | Why |
+|-----------|-------------|-----|
+| Robot stays in WiFi range | `kachaka_core` | Real-time control, richer API, easier debugging |
+| Route passes through WiFi dead zones | **Playground** | Script survives network loss -- runs on-board |
+| Factory/warehouse with unreliable WiFi | **Playground** | Cannot guarantee connectivity during movement |
+| Long-running autonomous task (>30 min) | **Playground** | Even brief WiFi drops can abort external commands |
+| Need operator confirmation without network | **Playground + IMU** | Physical shake replaces network-based confirmation |
+| Need real-time dashboard or camera stream | `kachaka_core` | Playground cannot push data out without WiFi |
+
+**Decision rule**: If the robot must travel to any location where WiFi may be unavailable -- even briefly during movement -- use Playground.
+
+### Container Environment
+
+| Constraint | Detail |
+|------------|--------|
+| gRPC address | `100.94.1.1:26400` (container-internal, always reachable) |
+| Resolver | Must call `client.update_resolver()` before name-based commands |
+| Libraries | stdlib only (`json`, `threading`, `time`, etc.) -- no pip |
+| Ports exposed | 26400 (gRPC), 26500 (SSH), 26501 (JupyterLab) |
+| Script path | `/home/kachaka/<filename>` |
+
+### MCP Tool Workflow
+
+```
+1. playground_upload(ip, script_content, filename)   → push to container
+2. playground_run(ip, filename)                       → start in background
+3. playground_log(ip)                                 → monitor output
+4. playground_stop(ip, filename)                      → stop if needed
+5. playground_status(ip, filename)                    → check if still running
+```
+
+### Example: Offline Multi-Stop Route with IMU Shake Detection
+
+See [`skills/kachaka-sdk/examples/playground_offline_route.py`](skills/kachaka-sdk/examples/playground_offline_route.py) for a production-verified script (tested on robot BKP40HD1T) that demonstrates:
+
+- **Multi-stop shelf delivery** -- configurable stop list with per-stop timeouts
+- **IMU shake detection** -- background thread with 2-of-3 sample voting, arm/disarm gating to avoid false positives during dock/undock (impacts reach 13+ m/s²)
+- **Dual indicator thresholds** -- accel > 11.0 m/s² OR gyro > 0.8 rad/s (gyro catches shakes that accel alone misses)
+- **Optional HTTP progress reporting** -- best-effort POST to external server with retry for network recovery
+- **Graceful error recovery** -- returns shelf and goes home on any failure
+
+Deployment via SSH:
+
+```bash
+scp -P 26500 playground_offline_route.py kachaka@<robot-ip>:/home/kachaka/
+ssh -p 26500 kachaka@<robot-ip> "nohup python3 -u /home/kachaka/playground_offline_route.py > /tmp/route.log 2>&1 &"
+```
+
 ## Error Handling
 
 ### Automatic Retry
@@ -928,6 +1000,7 @@ graph LR
     subgraph skills["skills/kachaka-sdk/ — Plugin skill"]
         S_MD["SKILL.md — Full API reference"]
         S_EX["examples/typical_usage.py"]
+        S_PG["examples/playground_offline_route.py"]
     end
 
     subgraph plugin[".claude-plugin/ — Plugin metadata"]
