@@ -709,6 +709,23 @@ def get_auto_homing(ip: str) -> dict:
     return KachakaQueries(KachakaConnection.get(ip)).get_auto_homing_enabled()
 
 
+# ── Recovery ────────────────────────────────────────────────────────
+
+@mcp.tool()
+def restart_robot(ip: str) -> dict:
+    """Reboot the robot to clear hardware-fatal errors (e.g. 21004 LiDAR).
+
+    Heavy operation — the robot drops the gRPC connection, cancels every
+    in-flight task, and takes ~30 seconds to come back. Wait for
+    ``ping_robot`` to succeed before issuing further commands.
+
+    Use only when ``is_ready`` returns ``recovery_hint="restart_robot"``.
+    Does NOT clear paused state (21051), which requires the physical
+    power button.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).restart_robot()
+
+
 # ── Readiness ───────────────────────────────────────────────────────
 
 @mcp.tool()

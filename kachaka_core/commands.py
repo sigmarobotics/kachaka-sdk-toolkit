@@ -581,6 +581,29 @@ class KachakaCommands:
         result = self.sdk.set_auto_homing_enabled(enabled)
         return self._result_to_dict(result, action="set_auto_homing", target=str(enabled))
 
+    # ── Recovery ─────────────────────────────────────────────────────
+
+    def restart_robot(self) -> dict:
+        """Reboot the robot to clear hardware-fatal errors (e.g. 21004 LiDAR).
+
+        This is a heavy operation: the robot drops the gRPC connection,
+        cancels every in-flight task, and takes ~30 seconds to come back.
+        Use it only when ``is_ready()`` reports
+        ``recovery_hint="restart_robot"``. Pressed-pause state (21051) is
+        not cleared by this — it requires the physical power button.
+
+        Returns immediately after the RPC is acknowledged. Callers should
+        wait for ``ping()`` to succeed again before issuing further commands.
+        """
+        try:
+            result = self.sdk.restart_robot()
+        except Exception as exc:
+            # Robot may close the gRPC channel before the response arrives;
+            # treat connection-drop on this RPC as a successful restart.
+            logger.info("restart_robot RPC closed connection: %s", exc)
+            return {"ok": True, "action": "restart_robot", "note": "rpc closed by reboot"}
+        return self._result_to_dict(result, action="restart_robot")
+
     # ── Internal ─────────────────────────────────────────────────────
 
     def _resolve_error_description(self, error_code: int) -> str:
