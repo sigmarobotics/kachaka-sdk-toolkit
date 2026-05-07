@@ -1336,6 +1336,12 @@ class TestDisconnectHandling:
         mock_client.get_robot_pose.return_value = pose
         mock_client.is_command_running.return_value = True
         mock_client.get_battery_info.return_value = (72, "CHARGING")
+        mock_client.get_moving_shelf_id.return_value = ""
+        mock_client.get_error.return_value = []
+        mock_client.get_last_command_result.return_value = (
+            MagicMock(success=True, error_code=0),
+            MagicMock(),
+        )
 
         ctrl, conn = self._make_ctrl(mock_client)
 

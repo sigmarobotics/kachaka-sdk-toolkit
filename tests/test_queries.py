@@ -192,28 +192,69 @@ class TestRobotInfo:
 
 
 class TestIsReady:
-    def test_ready(self):
+    def test_ready_when_no_active_errors(self):
         mock = MagicMock()
+        mock.get_error.return_value = []
+        mock.get_last_command_result.return_value = (
+            MagicMock(success=True, error_code=0),
+            MagicMock(),
+        )
         conn = _make_conn(mock)
-        # Re-assign stub after _make_conn (which replaces it with a real one)
-        mock_stub = MagicMock()
-        mock_stub.IsReady.return_value = MagicMock(ready=True)
-        mock.stub = mock_stub
 
         result = KachakaQueries(conn).is_ready()
         assert result["ok"] is True
         assert result["ready"] is True
+        assert result["fatal_codes"] == []
+        assert result["category"] is None
+        assert result["recovery_hint"] is None
+        assert result["last_command_error_code"] == 0
 
-    def test_not_ready(self):
+    def test_paused_state(self):
+        """21051 in errors[] → ready=False with press_power_button hint."""
         mock = MagicMock()
+        mock.get_error.return_value = [21051]
+        mock.get_last_command_result.return_value = (
+            MagicMock(success=False, error_code=10107),
+            MagicMock(),
+        )
         conn = _make_conn(mock)
-        mock_stub = MagicMock()
-        mock_stub.IsReady.return_value = MagicMock(ready=False)
-        mock.stub = mock_stub
 
         result = KachakaQueries(conn).is_ready()
-        assert result["ok"] is True
         assert result["ready"] is False
+        assert result["fatal_codes"] == [21051]
+        assert result["category"] == "paused"
+        assert result["recovery_hint"] == "press_power_button"
+        assert result["last_command_error_code"] == 10107
+
+    def test_hardware_fatal(self):
+        """21004 LiDAR error → ready=False with restart_robot hint."""
+        mock = MagicMock()
+        mock.get_error.return_value = [21004]
+        mock.get_last_command_result.return_value = (
+            MagicMock(success=False, error_code=10264),
+            MagicMock(),
+        )
+        conn = _make_conn(mock)
+
+        result = KachakaQueries(conn).is_ready()
+        assert result["ready"] is False
+        assert result["fatal_codes"] == [21004]
+        assert result["category"] == "hardware_fatal"
+        assert result["recovery_hint"] == "restart_robot"
+
+    def test_ghost_last_result_does_not_block(self):
+        """Cleared errors with stale last_result=10107 → still ready=True."""
+        mock = MagicMock()
+        mock.get_error.return_value = []
+        mock.get_last_command_result.return_value = (
+            MagicMock(success=False, error_code=10107),
+            MagicMock(),
+        )
+        conn = _make_conn(mock)
+
+        result = KachakaQueries(conn).is_ready()
+        assert result["ready"] is True
+        assert result["last_command_error_code"] == 10107
 
 
 class TestAutoHomingQuery:

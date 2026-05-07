@@ -18,6 +18,7 @@ import math
 from kachaka_api.generated import kachaka_api_pb2 as pb2
 
 from .connection import KachakaConnection
+from .error_codes import categorize_active_errors, recovery_hint
 from .error_handling import with_retry
 
 logger = logging.getLogger(__name__)
@@ -343,14 +344,36 @@ class KachakaQueries:
 
     @with_retry()
     def is_ready(self) -> dict:
-        """Check if the robot is ready to accept commands.
+        """Check whether the robot can currently accept new task commands.
 
-        This gRPC RPC is not wrapped by the official Python SDK.
-        Always returns immediately (non-blocking).
+        Returns a dict with:
+
+        - ``ready`` (bool): True iff ``get_error()`` is empty.
+        - ``fatal_codes`` (list[int]): active 2xxxx codes from
+          ``get_error()`` (e.g. ``[21051]`` paused, ``[21004]`` LiDAR).
+        - ``category`` (str | None): ``"paused"`` / ``"hardware_fatal"`` /
+          ``"unknown"`` / ``None`` when healthy.
+        - ``recovery_hint`` (str | None): ``"press_power_button"`` /
+          ``"restart_robot"`` / ``"manual_check"`` / ``None``.
+        - ``last_command_error_code`` (int): error code of the most recent
+          command, **informational only** — does not affect ``ready``.
+
+        This intentionally does NOT call the firmware ``IsReady`` RPC. That
+        RPC returns ``true`` even when the robot is paused (21051) or has a
+        fatal LiDAR error (21004) and silently rejects every command, so it
+        is unsafe as a pre-dispatch gate.
         """
-        request = pb2.EmptyRequest()
-        response = self.sdk.stub.IsReady(request)
-        return {"ok": True, "ready": response.ready}
+        errors = list(self.sdk.get_error() or [])
+        last_result, _ = self.sdk.get_last_command_result()
+        last_err = last_result.error_code if not last_result.success else 0
+        return {
+            "ok": True,
+            "ready": not errors,
+            "fatal_codes": errors,
+            "category": categorize_active_errors(errors),
+            "recovery_hint": recovery_hint(errors),
+            "last_command_error_code": last_err,
+        }
 
     # ── Auto homing ──────────────────────────────────────────────────
 

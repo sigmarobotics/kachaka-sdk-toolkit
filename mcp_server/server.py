@@ -730,7 +730,17 @@ def restart_robot(ip: str) -> dict:
 
 @mcp.tool()
 def is_ready(ip: str) -> dict:
-    """Check if the robot is ready to accept commands (non-blocking)."""
+    """Check whether the robot can currently accept new task commands.
+
+    Returns ``ready=True`` iff ``get_errors()`` is empty. When ``ready=False``,
+    the response includes ``fatal_codes``, a ``category`` (``"paused"`` /
+    ``"hardware_fatal"`` / ``"unknown"``), and a ``recovery_hint``
+    (``"press_power_button"`` for code 21051, ``"restart_robot"`` for 21004).
+
+    Use this as the gate before dispatching a movement command. Note that
+    ``last_command_error_code`` is informational only — a previous failure
+    does not block new commands once the active error clears.
+    """
     return KachakaQueries(KachakaConnection.get(ip)).is_ready()
 
 

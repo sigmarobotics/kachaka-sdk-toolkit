@@ -20,6 +20,7 @@ from typing import Iterator, Optional
 from kachaka_api.generated import kachaka_api_pb2 as pb2
 
 from .connection import KachakaConnection
+from .error_codes import categorize_active_errors, recovery_hint
 from .error_handling import with_retry
 
 logger = logging.getLogger(__name__)
@@ -614,13 +615,27 @@ class KachakaCommands:
         return ""
 
     def _result_to_dict(self, result, *, action: str = "", target: str = "") -> dict:
-        """Convert a ``pb2.Result`` into a standardised response dict."""
+        """Convert a ``pb2.Result`` into a standardised response dict.
+
+        On failure, also queries ``get_error()`` to surface the *active* state
+        errors causing the rejection. ``recoverable=False`` means the failure
+        will repeat until the upstream active error is cleared (e.g. paused
+        state needs a physical power button, LiDAR fault needs ``restart_robot``).
+        """
         d: dict = {"ok": result.success}
         if not result.success:
             ec = result.error_code
             d["error_code"] = ec
             desc = self._resolve_error_description(ec)
             d["error"] = f"error_code={ec}" + (f": {desc}" if desc else "")
+            try:
+                active = list(self.sdk.get_error() or [])
+            except Exception:
+                active = []
+            d["underlying_errors"] = active
+            d["category"] = categorize_active_errors(active)
+            d["recovery_hint"] = recovery_hint(active)
+            d["recoverable"] = not active
         if action:
             d["action"] = action
         if target:

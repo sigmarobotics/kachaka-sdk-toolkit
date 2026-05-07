@@ -46,6 +46,9 @@ class RobotState:
     connection_state: str = "connected"
     disconnected_at: Optional[float] = None
     last_reconnect_at: Optional[float] = None
+    errors: list[int] = field(default_factory=list)
+    last_command_error_code: int = 0
+    errors_updated: float = 0.0
 
 
 @dataclass
@@ -240,6 +243,18 @@ class RobotController:
             except Exception:
                 logger.debug("State poll (fast) error", exc_info=True)
 
+            # Fast cycle: active errors + last command result code
+            try:
+                active = list(sdk.get_error() or [])
+                last_result, _ = sdk.get_last_command_result()
+                last_err = last_result.error_code if not last_result.success else 0
+                with self._state_lock:
+                    self._state.errors = active
+                    self._state.last_command_error_code = last_err
+                    self._state.errors_updated = now
+            except Exception:
+                logger.debug("State poll (fast/errors) error", exc_info=True)
+
             # Slow cycle: battery
             if now - last_slow >= self._slow_interval:
                 try:
@@ -278,6 +293,10 @@ class RobotController:
             is_running = sdk.is_command_running()
             battery_pct, _ = sdk.get_battery_info()
             moving_shelf = sdk.get_moving_shelf_id() or None
+            active = list(sdk.get_error() or [])
+            last_result, _ = sdk.get_last_command_result()
+            last_err = last_result.error_code if not last_result.success else 0
+            now = time.time()
             with self._state_lock:
                 self._state.pose_x = pose.x
                 self._state.pose_y = pose.y
@@ -285,7 +304,10 @@ class RobotController:
                 self._state.is_command_running = is_running
                 self._state.battery_pct = int(battery_pct)
                 self._state.moving_shelf_id = moving_shelf
-                self._state.last_updated = time.time()
+                self._state.errors = active
+                self._state.last_command_error_code = last_err
+                self._state.errors_updated = now
+                self._state.last_updated = now
         except Exception:
             logger.debug("Reconnect probe failed", exc_info=True)
 
