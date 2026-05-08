@@ -1,6 +1,6 @@
 # kachaka-sdk-toolkit
 
-A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 66 tools for AI-driven robot control, and a Skill reference document for development-time agents.
+A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 75 tools for AI-driven robot control, and a Skill reference document for development-time agents.
 
 ## Overview
 
@@ -13,7 +13,7 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 ```mermaid
 graph TD
     subgraph Consumers
-        MCP["MCP Server<br/>(66 tools, stdio)"]
+        MCP["MCP Server<br/>(75 tools, stdio)"]
         SKILL["Skill .md"]
         APP["Your Script<br/>or App"]
     end
@@ -69,7 +69,7 @@ graph TD
 - **Map management** -- Export, import, switch, and create maps from ROS-style PNG occupancy grids. `import_image_as_map` uses gRPC `stream_unary` directly for chunked image upload.
 - **Torch control** -- Set front/back LED torch intensity (0--255) for illumination.
 - **Laser scan** -- Activate on-demand LiDAR scans for a configurable duration.
-- **MCP Server** -- 66 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
+- **MCP Server** -- 75 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
 - **Skill document** -- A self-contained reference (`skills/kachaka-sdk/SKILL.md`) for development-time LLM agents.
 
 ## Tech Stack
@@ -567,7 +567,7 @@ annotated = det.annotate_frame(raw, result["objects"])
 
 ## MCP Server
 
-The MCP Server exposes 66 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
+The MCP Server exposes 75 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
 
 ### Running the Server
 
@@ -751,6 +751,12 @@ The controller tools expose `RobotController` through the MCP server, providing 
 |------|-------------|
 | `is_ready` | Non-blocking readiness check |
 
+#### Recovery (1 tool)
+
+| Tool | Description |
+|------|-------------|
+| `restart_robot` | Reboot the robot to clear hardware-fatal errors (e.g. 21004 LiDAR). Use only when `is_ready` reports `recovery_hint="restart_robot"` |
+
 #### Transforms (4 tools)
 
 | Tool | Description |
@@ -759,6 +765,18 @@ The controller tools expose `RobotController` through the MCP server, providing 
 | `start_transform_stream` | Start background dynamic TF streaming |
 | `get_dynamic_transform` | Get latest dynamic transforms from stream |
 | `stop_transform_stream` | Stop transform streaming |
+
+#### Playground (5 tools)
+
+Manage scripts running inside the robot's on-board Docker container — see the Playground Offline Execution section below.
+
+| Tool | Description |
+|------|-------------|
+| `playground_upload` | Upload a Python script to the robot via SSH (port 26500) |
+| `playground_run` | Run an uploaded script in the background, capturing stdout/stderr to `/tmp/<filename>.log` |
+| `playground_stop` | Stop a running script |
+| `playground_log` | Tail the script's log file |
+| `playground_status` | Check whether a script is still running |
 
 ## Playground Offline Execution
 
@@ -965,17 +983,18 @@ pytest tests/test_commands.py::TestRetry
 
 | Module | Tests | Covers |
 |--------|-------|--------|
-| `test_connection.py` | Connection pool, normalisation, ping, resolver, monitoring, caching |
-| `test_commands.py` | Movement, shelf ops, speech, shortcuts, map, torch, laser, retry, cancel, stop |
-| `test_queries.py` | Status, locations, shelves, camera, intrinsics, ToF, map, errors, info |
-| `test_error_handling.py` | Retry modes (count + deadline), backoff, non-retryable errors |
-| `test_interceptors.py` | TimeoutInterceptor default deadline injection, passthrough |
-| `test_camera.py` | Lifecycle, capture, stats, errors, callbacks, thread safety, disconnect skip |
-| `test_controller.py` | State polling, command execution, metrics, racing conditions, disconnect handling |
-| `test_detection.py` | Detections, capture+detect, annotation, label mapping, error handling |
-| `test_server_controller.py` | MCP controller tools: start/stop lifecycle, idempotency, state dict |
-| `test_transform.py` | TransformStreamer lifecycle, auto-reconnect, stats, thread safety |
-| **Total** | **239 tests** |
+| `test_connection.py` | 34 | Connection pool, normalisation, ping, resolver, monitoring, caching |
+| `test_commands.py` | 48 | Movement (incl. mute_sensors / move_by_velocity_muted / source_location_id), shelf ops, speech, shortcuts, map, torch, laser, retry, cancel, stop |
+| `test_queries.py` | 32 | Status, locations (incl. digest), shelves (incl. digest), camera, intrinsics, ToF, map, errors, info |
+| `test_error_handling.py` | 13 | Retry modes (count + deadline), backoff, non-retryable errors |
+| `test_interceptors.py` | 6 | TimeoutInterceptor default deadline injection, passthrough |
+| `test_camera.py` | 33 | Lifecycle, capture, stats, errors, callbacks, thread safety, disconnect skip |
+| `test_controller.py` | 48 | State polling, command execution, metrics, racing conditions, disconnect handling |
+| `test_detection.py` | 14 | Detections, capture+detect, annotation, label mapping, error handling |
+| `test_server_controller.py` | 9 | MCP controller tools: start/stop lifecycle, idempotency, state dict |
+| `test_transform.py` | 12 | TransformStreamer lifecycle, auto-reconnect, stats, thread safety |
+| `test_playground.py` | 12 | Playground SSH upload/run/stop/log/status (requires `asyncssh` extra) |
+| **Total** | **261 tests** | |
 
 All tests use the `_clean_pool` autouse fixture to ensure isolation between tests.
 
@@ -1000,7 +1019,7 @@ graph LR
 
     subgraph mcp["mcp_server/ — MCP Server layer"]
         M_INIT["__init__.py"]
-        M_SRV["server.py — 66 tools, stdio transport"]
+        M_SRV["server.py — 75 tools, stdio transport"]
     end
 
     subgraph skills["skills/kachaka-sdk/ — Plugin skill"]
@@ -1013,7 +1032,7 @@ graph LR
         P_JSON["plugin.json"]
     end
 
-    subgraph tests["tests/ — pytest suite (239 tests)"]
+    subgraph tests["tests/ — pytest suite (261 tests)"]
         T_CONN["test_connection.py"]
         T_CMD["test_commands.py"]
         T_QRY["test_queries.py"]
