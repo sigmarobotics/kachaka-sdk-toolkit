@@ -98,9 +98,29 @@ def list_locations(ip: str) -> dict:
 
 
 @mcp.tool()
+def list_locations_digest(ip: str) -> dict:
+    """Lightweight locations list (id, name, type) — kachaka-api 3.16.1+.
+
+    Smaller payload than ``list_locations`` (no pose). Prefer for pickers
+    and any UI that only needs names.
+    """
+    return KachakaQueries(KachakaConnection.get(ip)).list_locations_digest()
+
+
+@mcp.tool()
 def list_shelves(ip: str) -> dict:
     """All registered shelves (name, id, home location)."""
     return KachakaQueries(KachakaConnection.get(ip)).list_shelves()
+
+
+@mcp.tool()
+def list_shelves_digest(ip: str) -> dict:
+    """Lightweight shelves list (id, name) — kachaka-api 3.16.1+.
+
+    Smaller payload than ``list_shelves`` (no home location). Prefer for
+    pickers and any UI that only needs names.
+    """
+    return KachakaQueries(KachakaConnection.get(ip)).list_shelves_digest()
 
 
 @mcp.tool()
@@ -112,13 +132,25 @@ def get_moving_shelf(ip: str) -> dict:
 # ── Movement ─────────────────────────────────────────────────────────
 
 @mcp.tool()
-def move_to_location(ip: str, location_name: str) -> dict:
+def move_to_location(
+    ip: str,
+    location_name: str,
+    source_location_name: str = "",
+) -> dict:
     """Move robot to a registered location by name or ID.
 
     Use ``list_locations`` first to see available destinations.
     This is a blocking call — returns when movement completes.
+
+    source_location_name: optional path-planning hint (kachaka-api 3.16.1+).
+    Forces the planner to treat this location as the route's starting point
+    — useful when localisation is uncertain or a specific corridor is
+    required.
     """
-    return KachakaCommands(KachakaConnection.get(ip)).move_to_location(location_name)
+    return KachakaCommands(KachakaConnection.get(ip)).move_to_location(
+        location_name,
+        source_location_name=source_location_name,
+    )
 
 
 @mcp.tool()
@@ -128,9 +160,39 @@ def move_to_pose(ip: str, x: float, y: float, yaw: float) -> dict:
 
 
 @mcp.tool()
-def move_forward(ip: str, distance_meter: float) -> dict:
-    """Move forward (positive) or backward (negative) by a distance in meters."""
-    return KachakaCommands(KachakaConnection.get(ip)).move_forward(distance_meter)
+def move_forward(
+    ip: str,
+    distance_meter: float,
+    mute_sensors: bool = False,
+) -> dict:
+    """Move forward (positive) or backward (negative) by a distance in meters.
+
+    mute_sensors: when True (kachaka-api 3.16.1+), bypass safety sensors for
+    this move. Use only for rescuing the robot from a tight spot — collision
+    detection is suppressed.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).move_forward(
+        distance_meter, mute_sensors=mute_sensors,
+    )
+
+
+@mcp.tool()
+def move_by_velocity_muted(
+    ip: str,
+    signed_velocity: float,
+    duration_sec: float,
+) -> dict:
+    """Drive at a fixed velocity for a duration with safety sensors muted.
+
+    Introduced in kachaka-api 3.16.1. First-class command (not manual
+    control) for rescue / recovery scenarios where the robot is wedged.
+    ``signed_velocity`` clamped to [-0.3, 0.3] m/s, ``duration_sec`` to
+    [0, 30] s. Collision detection is suppressed for the whole move — use
+    with care.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).move_by_velocity_muted(
+        signed_velocity, duration_sec,
+    )
 
 
 @mcp.tool()

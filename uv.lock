@@ -176,7 +176,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -311,7 +311,7 @@ wheels = [
 
 [[package]]
 name = "kachaka-api"
-version = "3.14.4.0"
+version = "3.16.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
@@ -319,9 +319,9 @@ dependencies = [
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/86/72/667c9616ecd3c0005e62e082a0f9a7803be5a72199a793c80c2e387393e6/kachaka_api-3.14.4.0.tar.gz", hash = "sha256:1a1969e110e7fd6aedbadc18796a707379ed7ba2ea62369ea7050ad5c889e4fa", size = 43320, upload-time = "2025-11-17T07:06:40.998Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/2c/33c941029b9445983ed709829770b0d8d98fbe5517f997d0fcc9b6241253/kachaka_api-3.16.1.0.tar.gz", hash = "sha256:ecd0c5d5f7b9f00a9773039285e8b376b97fa59b518debaaf705675bbc75d734", size = 44001, upload-time = "2026-04-28T01:07:01.101Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/97/26/a20c210283b05373d8f4a21feb7ae4ce7b2e6162a85cfa9b9995d37ac790/kachaka_api-3.14.4.0-py3-none-any.whl", hash = "sha256:3465ff956229d4f0ebe1169ffb735873c902c5e10f6049a7c28ef236d8708f90", size = 41645, upload-time = "2025-11-17T07:06:39.601Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/1c/ffc6c7fc2851daf38768053554aeb4822bc6da98ac541f870b3c56776c2e/kachaka_api-3.16.1.0-py3-none-any.whl", hash = "sha256:27b0bd48cbeed77bbe0642afc16c902a25dd8396f5c6a0b56e10a3e68d3e0b6b", size = 42297, upload-time = "2026-04-28T01:06:59.546Z" },
 ]
 
 [[package]]
@@ -349,7 +349,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "grpcio", specifier = ">=1.66" },
-    { name = "kachaka-api", specifier = ">=3.10" },
+    { name = "kachaka-api", specifier = ">=3.16" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.0" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'" },

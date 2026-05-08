@@ -96,19 +96,43 @@ class KachakaCommands:
         cancel_all: bool = True,
         tts_on_success: str = "",
         title: str = "",
+        source_location_name: str = "",
     ) -> dict:
         """Move to a registered location by name or ID.
 
         The resolver is initialised on first use so that name lookups work.
+
+        Args:
+            source_location_name: Optional path-planning hint introduced in
+                kachaka-api 3.16.1. When set, the planner treats this
+                location as the starting point for the route. Useful when
+                the robot's localisation is uncertain or the caller wants
+                to force a specific corridor.
         """
         self.conn.ensure_resolver()
         location_id = self.conn.resolve_location(location_name)
-        result = self.sdk.move_to_location(
-            location_id,
-            cancel_all=cancel_all,
-            tts_on_success=tts_on_success,
-            title=title,
-        )
+
+        if source_location_name:
+            source_id = self.conn.resolve_location(source_location_name)
+            cmd = pb2.Command(
+                move_to_location_command=pb2.MoveToLocationCommand(
+                    target_location_id=location_id,
+                    source_location_id=source_id,
+                )
+            )
+            result = self._start_command_advanced(
+                cmd,
+                cancel_all=cancel_all,
+                tts_on_success=tts_on_success,
+                title=title,
+            )
+        else:
+            result = self.sdk.move_to_location(
+                location_id,
+                cancel_all=cancel_all,
+                tts_on_success=tts_on_success,
+                title=title,
+            )
         return self._result_to_dict(result, action="move_to_location", target=location_name)
 
     @with_retry()
@@ -132,13 +156,70 @@ class KachakaCommands:
         return self._result_to_dict(result, action="move_to_pose", target=f"({x}, {y}, {yaw})")
 
     @with_retry()
-    def move_forward(self, distance_meter: float, *, speed: float = 0.0) -> dict:
+    def move_forward(
+        self,
+        distance_meter: float,
+        *,
+        speed: float = 0.1,
+        mute_sensors: bool = False,
+    ) -> dict:
         """Move forward (positive) or backward (negative) by *distance_meter*.
 
-        ``speed=0.0`` lets the robot decide. Max is 0.3 m/s.
+        ``speed`` is the absolute travel speed in m/s, range (0, 0.3]. The
+        firmware rejects ``speed=0.0`` with error 15508 (invalid parameter)
+        on 3.16+, so the default is ``0.1`` m/s.
+
+        Args:
+            mute_sensors: When True (kachaka-api 3.16.1+), bypass safety
+                sensors during the move. Useful for rescuing the robot
+                from a tight spot or pushing through a docking edge.
+                **Use with care** — collision detection is suppressed.
         """
-        result = self.sdk.move_forward(distance_meter, speed=speed)
+        if mute_sensors:
+            cmd = pb2.Command(
+                move_forward_command=pb2.MoveForwardCommand(
+                    distance_meter=distance_meter,
+                    speed=speed,
+                    mute_sensors=True,
+                )
+            )
+            result = self._start_command_advanced(cmd)
+        else:
+            result = self.sdk.move_forward(distance_meter, speed=speed)
         return self._result_to_dict(result, action="move_forward", target=f"{distance_meter}m")
+
+    @with_retry()
+    def move_by_velocity_muted(
+        self,
+        signed_velocity: float,
+        duration_sec: float,
+    ) -> dict:
+        """Drive at *signed_velocity* m/s for *duration_sec* with sensors muted.
+
+        Introduced in kachaka-api 3.16.1. Unlike ``set_velocity``, this is a
+        first-class command (not manual control) and bypasses safety sensors
+        for the whole duration. Intended for **rescue / recovery** scenarios
+        where the robot is wedged and needs to crawl out at low speed.
+
+        ``signed_velocity`` is clamped to [-0.3, 0.3] m/s.
+        ``duration_sec`` is clamped to [0, 30] s as a safety bound.
+
+        :warning: Collision detection is suppressed for the entire move.
+        """
+        signed_velocity = max(-0.3, min(0.3, signed_velocity))
+        duration_sec = max(0.0, min(30.0, duration_sec))
+        cmd = pb2.Command(
+            move_by_velocity_with_muted_sensors_command=pb2.MoveByVelocityWithMutedSensorsCommand(
+                signed_velocity=signed_velocity,
+                move_duration_sec=duration_sec,
+            )
+        )
+        result = self._start_command_advanced(cmd)
+        return self._result_to_dict(
+            result,
+            action="move_by_velocity_muted",
+            target=f"v={signed_velocity}m/s, dur={duration_sec}s",
+        )
 
     @with_retry()
     def rotate_in_place(self, angle_radian: float) -> dict:

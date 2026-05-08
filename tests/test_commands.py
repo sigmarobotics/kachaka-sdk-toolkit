@@ -576,6 +576,100 @@ class TestPollUntilComplete:
         assert result["error"] == "timeout"
 
 
+def _wire_advanced_stub(mock_client) -> MagicMock:
+    """Wire StartCommand / GetCommandState / GetLastCommandResult for ``_start_command_advanced``."""
+    mock_stub = MagicMock()
+    cmd_state_resp = MagicMock()
+    cmd_state_resp.metadata.cursor = 100
+    mock_stub.GetCommandState.return_value = cmd_state_resp
+    start_resp = MagicMock()
+    start_resp.result.success = True
+    start_resp.command_id = "cmd-mute"
+    mock_stub.StartCommand.return_value = start_resp
+    last_resp = MagicMock()
+    last_resp.metadata.cursor = 200
+    last_resp.command_id = "cmd-mute"
+    mock_stub.GetLastCommandResult.return_value = last_resp
+    mock_client.get_last_command_result.return_value = (_make_result(True), MagicMock())
+    mock_client.stub = mock_stub
+    return mock_stub
+
+
+class TestMoveForwardMuteSensors:
+    def test_default_uses_sdk(self):
+        mock_client = MagicMock()
+        mock_client.move_forward.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).move_forward(0.5)
+        assert result["ok"] is True
+        mock_client.move_forward.assert_called_once_with(0.5, speed=0.1)
+
+    def test_mute_sensors_uses_start_command(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = _wire_advanced_stub(mock_client)
+
+        result = KachakaCommands(conn).move_forward(0.5, mute_sensors=True)
+        assert result["ok"] is True
+        mock_client.move_forward.assert_not_called()
+        mock_stub.StartCommand.assert_called_once()
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.move_forward_command.mute_sensors is True
+        assert req.command.move_forward_command.distance_meter == 0.5
+
+
+class TestMoveToLocationSource:
+    def test_default_uses_sdk(self):
+        mock_client = MagicMock()
+        mock_client.move_to_location.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).move_to_location("Kitchen")
+        assert result["ok"] is True
+        mock_client.move_to_location.assert_called_once()
+
+    def test_source_uses_start_command(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        # resolve_location echoes input as id (resolver mock)
+        with patch.object(conn, "resolve_location", side_effect=lambda n: f"id::{n}"):
+            mock_stub = _wire_advanced_stub(mock_client)
+            result = KachakaCommands(conn).move_to_location(
+                "Kitchen", source_location_name="Lobby",
+            )
+        assert result["ok"] is True
+        mock_client.move_to_location.assert_not_called()
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.move_to_location_command.target_location_id == "id::Kitchen"
+        assert req.command.move_to_location_command.source_location_id == "id::Lobby"
+
+
+class TestMoveByVelocityMuted:
+    def test_dispatches_command(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = _wire_advanced_stub(mock_client)
+
+        result = KachakaCommands(conn).move_by_velocity_muted(0.1, 5.0)
+        assert result["ok"] is True
+        req = mock_stub.StartCommand.call_args[0][0]
+        cmd = req.command.move_by_velocity_with_muted_sensors_command
+        assert cmd.signed_velocity == pytest.approx(0.1)
+        assert cmd.move_duration_sec == pytest.approx(5.0)
+
+    def test_clamps_velocity_and_duration(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = _wire_advanced_stub(mock_client)
+
+        KachakaCommands(conn).move_by_velocity_muted(99.0, 999.0)
+        req = mock_stub.StartCommand.call_args[0][0]
+        cmd = req.command.move_by_velocity_with_muted_sensors_command
+        assert cmd.signed_velocity == pytest.approx(0.3)
+        assert cmd.move_duration_sec == pytest.approx(30.0)
+
+
 class TestSwitchMapInvalidation:
     def test_switch_map_invalidates_map_cache(self):
         mock = MagicMock()

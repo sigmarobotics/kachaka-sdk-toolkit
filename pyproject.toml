@@ -10,7 +10,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "kachaka-api>=3.10",
+    "kachaka-api>=3.16",
     "grpcio>=1.66",
     "mcp[cli]>=1.0",
     "Pillow>=10.0",
@@ -34,7 +34,7 @@ build-backend = "setuptools.build_meta"
 include = ["kachaka_core*", "mcp_server*", "kachaka_sdk_toolkit*"]
 
 [tool.setuptools_scm]
-fallback_version = "0.4.1"
+fallback_version = "0.4.2"
 
 [dependency-groups]
 dev = [

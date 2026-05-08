@@ -101,6 +101,23 @@ class KachakaQueries:
             ],
         }
 
+    @with_retry()
+    def list_locations_digest(self) -> dict:
+        """Lightweight registered-locations list (id, name, type only).
+
+        Uses the ``GetLocationsDigest`` RPC introduced in kachaka-api 3.16.1.
+        Drops pose/extras so the payload is much smaller — prefer this when
+        you only need names (e.g. to populate a picker UI).
+        """
+        response = self.sdk.stub.GetLocationsDigest(pb2.GetRequest())
+        return {
+            "ok": True,
+            "locations": [
+                {"id": loc.id, "name": loc.name, "type": str(loc.type)}
+                for loc in response.locations
+            ],
+        }
+
     # ── Shelves ──────────────────────────────────────────────────────
 
     @with_retry()
@@ -116,6 +133,22 @@ class KachakaQueries:
                     "home_location_id": s.home_location_id,
                 }
                 for s in shelves
+            ],
+        }
+
+    @with_retry()
+    def list_shelves_digest(self) -> dict:
+        """Lightweight registered-shelves list (id, name only).
+
+        Uses the ``GetShelvesDigest`` RPC introduced in kachaka-api 3.16.1.
+        Drops home location / size / app metadata so the payload is much
+        smaller — prefer this when you only need names.
+        """
+        response = self.sdk.stub.GetShelvesDigest(pb2.GetRequest())
+        return {
+            "ok": True,
+            "shelves": [
+                {"id": s.id, "name": s.name} for s in response.shelves
             ],
         }
 

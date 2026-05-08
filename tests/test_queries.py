@@ -58,6 +58,26 @@ class TestLocations:
         assert len(result["locations"]) == 1
         assert result["locations"][0]["name"] == "Kitchen"
 
+    def test_list_locations_digest(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_stub = MagicMock()
+        loc = MagicMock()
+        loc.id = "loc-1"
+        loc.name = "Kitchen"
+        loc.type = "CHARGER"
+        digest_resp = MagicMock()
+        digest_resp.locations = [loc]
+        mock_stub.GetLocationsDigest.return_value = digest_resp
+        mock.stub = mock_stub
+
+        result = KachakaQueries(conn).list_locations_digest()
+
+        assert result["ok"] is True
+        assert result["locations"] == [{"id": "loc-1", "name": "Kitchen", "type": "CHARGER"}]
+        mock_stub.GetLocationsDigest.assert_called_once()
+
 
 class TestShelves:
     def test_list_shelves(self):
@@ -73,6 +93,25 @@ class TestShelves:
 
         assert result["ok"] is True
         assert result["shelves"][0]["name"] == "Shelf A"
+
+    def test_list_shelves_digest(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_stub = MagicMock()
+        shelf = MagicMock()
+        shelf.id = "shelf-1"
+        shelf.name = "Shelf A"
+        digest_resp = MagicMock()
+        digest_resp.shelves = [shelf]
+        mock_stub.GetShelvesDigest.return_value = digest_resp
+        mock.stub = mock_stub
+
+        result = KachakaQueries(conn).list_shelves_digest()
+
+        assert result["ok"] is True
+        assert result["shelves"] == [{"id": "shelf-1", "name": "Shelf A"}]
+        mock_stub.GetShelvesDigest.assert_called_once()
 
     def test_get_moving_shelf_empty(self):
         mock = MagicMock()
