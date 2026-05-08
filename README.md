@@ -77,7 +77,7 @@ graph TD
 | Component | Version |
 |-----------|---------|
 | Python | >= 3.10, < 3.13 |
-| kachaka-api | >= 3.10 |
+| kachaka-api | >= 3.16 |
 | grpcio | >= 1.66 |
 | mcp[cli] | >= 1.0 |
 | Pillow | >= 10.0 |
@@ -214,9 +214,10 @@ Robot action commands. All methods return `dict` with an `ok` key. All are decor
 
 | Method | Description |
 |--------|-------------|
-| `move_to_location(name)` | Move to a registered location by name or ID |
+| `move_to_location(name, source_location_name="")` | Move to a registered location by name or ID. Optional `source_location_name` (3.16.1+) forces the planner to treat the named location as the route's starting point -- useful when localisation is uncertain or a specific corridor is required |
 | `move_to_pose(x, y, yaw)` | Move to absolute map coordinates |
-| `move_forward(distance_meter)` | Move forward (positive) or backward (negative) |
+| `move_forward(distance_meter, speed=0.1, mute_sensors=False)` | Move forward (positive) or backward (negative). **Default `speed` is `0.1` m/s** -- 3.16+ firmware rejects `speed=0.0` with error 15508, so calls without an explicit speed now succeed. Set `mute_sensors=True` (3.16.1+) to bypass safety sensors for rescue/recovery when the robot is wedged; collision detection is suppressed -- use with care |
+| `move_by_velocity_muted(signed_velocity, duration_sec)` | Drive at the given m/s for the given seconds with safety sensors muted the entire time (3.16.1+). First-class rescue command. Velocity clamped to [-0.3, 0.3] m/s, duration to [0, 30] s |
 | `rotate_in_place(angle_radian)` | Rotate in place (positive = counter-clockwise) |
 | `return_home()` | Return to charger |
 | `move_shelf(shelf, location)` | Pick up shelf and deliver to location |
@@ -253,7 +254,9 @@ Read-only status queries. All methods return `dict` with an `ok` key. All are de
 | `get_pose()` | Current position (x, y, theta) |
 | `get_battery()` | Battery percentage and power status |
 | `list_locations()` | All registered locations with pose data |
+| `list_locations_digest()` | Lightweight variant (3.16.1+): `[{id, name, type}]` only, no pose. ~58% smaller payload -- intended for picker UIs |
 | `list_shelves()` | All registered shelves with home location |
+| `list_shelves_digest()` | Lightweight variant (3.16.1+): `[{id, name}]` only, no home location. Intended for picker UIs |
 | `get_moving_shelf()` | ID of currently carried shelf (or null) |
 | `get_command_state()` | Current command execution state |
 | `get_last_command_result()` | Result of most recently completed command |
@@ -613,21 +616,24 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `get_errors` | Active error codes |
 | `get_robot_info` | Serial number + firmware version |
 
-#### Locations and Shelves (3 tools)
+#### Locations and Shelves (5 tools)
 
 | Tool | Description |
 |------|-------------|
 | `list_locations` | All locations (name, id, type, pose) |
+| `list_locations_digest` | Lightweight locations list (id, name, type) -- ~58% smaller payload |
 | `list_shelves` | All shelves (name, id, home location) |
+| `list_shelves_digest` | Lightweight shelves list (id, name) |
 | `get_moving_shelf` | Currently carried shelf ID |
 
-#### Movement (5 tools)
+#### Movement (6 tools)
 
 | Tool | Description |
 |------|-------------|
-| `move_to_location` | Move to a named location |
+| `move_to_location` | Move to a named location. Accepts optional `source_location_name` to force the planner to treat that location as the route's starting point |
 | `move_to_pose` | Move to (x, y, yaw) coordinates |
-| `move_forward` | Move forward/backward by distance |
+| `move_forward` | Move forward/backward by distance. Accepts optional `mute_sensors=True` to bypass safety sensors for rescue/recovery |
+| `move_by_velocity_muted` | Drive at a signed velocity for a fixed duration with sensors muted (rescue command, clamped to ±0.3 m/s and 30 s) |
 | `rotate` | Rotate in place |
 | `return_home` | Return to charger |
 
