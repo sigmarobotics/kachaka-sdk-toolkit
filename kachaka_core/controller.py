@@ -688,11 +688,8 @@ class RobotController:
     ) -> dict:
         """Move the robot to an absolute map coordinate ``(x, y, yaw)``.
 
-        Use this when the target is not a registered location (e.g. patrol
-        points stored as raw coordinates). Polls ``GetCommandState`` (a
-        non-long-poll RPC) and returns ``{"error": "TIMEOUT"}`` if the
-        deadline passes, so a silently lost completion event cannot wedge
-        the caller indefinitely.
+        Use this when the target is not a registered location (e.g.
+        patrol points stored as raw coordinates).
         """
         cmd = pb2.Command(
             move_to_pose_command=pb2.MoveToPoseCommand(x=x, y=y, yaw=yaw)
