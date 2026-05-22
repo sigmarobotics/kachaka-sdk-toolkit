@@ -672,3 +672,100 @@ class RobotController:
             tts_on_success=tts_on_success,
             title=title,
         )
+
+    # ── Free-pose movement (no registered location required) ─────────
+
+    def move_to_pose(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        *,
+        timeout: float = 120.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Move the robot to an absolute map coordinate ``(x, y, yaw)``.
+
+        Use this when the target is not a registered location (e.g. patrol
+        points stored as raw coordinates). Polls ``GetCommandState`` (a
+        non-long-poll RPC) and returns ``{"error": "TIMEOUT"}`` if the
+        deadline passes, so a silently lost completion event cannot wedge
+        the caller indefinitely.
+        """
+        cmd = pb2.Command(
+            move_to_pose_command=pb2.MoveToPoseCommand(x=x, y=y, yaw=yaw)
+        )
+        return self._execute_command(
+            cmd,
+            "move_to_pose",
+            f"({x}, {y}, {yaw})",
+            timeout=timeout,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )
+
+    def move_forward(
+        self,
+        distance_meter: float,
+        *,
+        speed: float = 0.1,
+        mute_sensors: bool = False,
+        timeout: float = 60.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Move forward (positive) or backward (negative) by ``distance_meter``.
+
+        ``speed`` is the absolute travel speed in m/s, range (0, 0.3].
+        The firmware rejects ``speed=0.0`` with error 15508.
+
+        Args:
+            mute_sensors: When True (kachaka-api 3.16.1+), bypass safety
+                sensors during the move. Use with care — collision
+                detection is suppressed.
+        """
+        cmd = pb2.Command(
+            move_forward_command=pb2.MoveForwardCommand(
+                distance_meter=distance_meter,
+                speed=speed,
+                mute_sensors=mute_sensors,
+            )
+        )
+        return self._execute_command(
+            cmd,
+            "move_forward",
+            f"{distance_meter}m",
+            timeout=timeout,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )
+
+    def rotate_in_place(
+        self,
+        angle_radian: float,
+        *,
+        timeout: float = 30.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Rotate in place by ``angle_radian`` (positive = counter-clockwise)."""
+        cmd = pb2.Command(
+            rotate_in_place_command=pb2.RotateInPlaceCommand(
+                angle_radian=angle_radian
+            )
+        )
+        return self._execute_command(
+            cmd,
+            "rotate_in_place",
+            f"{angle_radian}rad",
+            timeout=timeout,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )

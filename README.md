@@ -21,12 +21,12 @@ graph TD
     subgraph kachaka_core["kachaka_core (shared)"]
         CONN["connection.py<br/>Pool mgmt · Health check<br/>Resolver · Two-tier cache"]
         INT["interceptors.py<br/>TimeoutInterceptor (5s default)<br/>gRPC deadline injection"]
-        CMD["commands.py<br/>Movement · Shelf ops · Torch<br/>Speech · Map mgmt · Manual"]
+        CMD["commands.py — KachakaCommands<br/>Simple wrappers (may block on long-poll)<br/>Movement · Shelf · Speech · Torch · Map"]
         QRY["queries.py<br/>Status · Camera intrinsics<br/>ToF · Locations · Map"]
         ERR["error_handling.py<br/>@with_retry<br/>Exponential backoff"]
         CAM["camera.py<br/>CameraStreamer (daemon thread)<br/>Detection overlay · Stats"]
         DET["detection.py<br/>ObjectDetector (on-device)<br/>Bbox annotation (PIL)"]
-        CTRL["controller.py<br/>RobotController<br/>Background polling · Metrics"]
+        CTRL["controller.py — RobotController<br/>Production movement (non-blocking + deadline)<br/>Background state polling · Metrics"]
         TF["transform.py<br/>TransformStreamer<br/>Dynamic TF · Auto-reconnect"]
     end
 
@@ -211,6 +211,8 @@ Reduces redundant gRPC round-trips for data that rarely changes:
 ### KachakaCommands
 
 Robot action commands. All methods return `dict` with an `ok` key. All are decorated with `@with_retry`.
+
+> **Movement commands here block until completion via the SDK's long-poll loop.** If the upstream completion event is silently dropped, the call hangs indefinitely (no internal timeout). For production services, patrols, or any caller that cannot tolerate a wedged thread, use [`RobotController`](#robotcontroller) instead — it polls `GetCommandState` with a deadline and always returns within `timeout=` seconds. `KachakaCommands` is best for simple one-shot scripts and for actions that `RobotController` does not expose (TTS, volume, torch, map switch, shortcuts, etc.).
 
 | Method | Description |
 |--------|-------------|
@@ -401,7 +403,24 @@ streamer.stop()
 
 ## RobotController
 
-Background state polling + non-blocking command execution with `command_id` verification. Use for multi-step patrols and metrics collection instead of `KachakaCommands`.
+Background state polling + non-blocking command execution with `command_id` verification and deadline-based timeout. **This is the production-recommended path for any caller that cares about timeouts or robustness.**
+
+### Why prefer this over `KachakaCommands`?
+
+`KachakaCommands` wraps the upstream Python SDK's convenience methods directly. Those methods drive completion through `GetLastCommandResult` — a **server-side long-poll** RPC that is intentionally exempted from the default 10s deadline (`kachaka_core/interceptors.py:43-48`). If the result-delivery stream is ever silently dropped (publisher race, half-open HTTP/2 stream, cursor mismatch), the call hangs **forever**. A real incident in production logged an 82-minute hang inside this loop while the robot had actually completed the move — only `docker restart` freed the thread.
+
+`RobotController._execute_command` was designed to avoid this entirely:
+
+| Behaviour | `KachakaCommands.*` | `RobotController.*` |
+|-----------|---------------------|---------------------|
+| Completion driver | SDK's blocking `while True: GetLastCommandResult(cursor)` (long-poll) | `GetCommandState` unary read (subject to interceptor's 10s timeout) + sleep |
+| Timeout | None on the long-poll — relies on caller's threading | Deadline-based; always returns within `timeout=` seconds |
+| Disconnect handling | Hangs until TCP RST | Returns `{"error": "DISCONNECTED"}` if `ConnectionState` drops |
+| Return on stall | Caller's thread stays wedged | Returns `{"error": "TIMEOUT"}` |
+| Background state | None — caller must poll separately | `state` snapshot kept fresh by `_state_loop` |
+| Metrics | None | RTT, poll count, success/failure counters |
+
+Use `KachakaCommands` only for **simple one-shot scripts** where blocking-forever is acceptable (e.g. interactive REPL, quick utility). For production services, patrols, dashboards, or anything driven by an upstream caller that can't be left hanging, **use `RobotController`**.
 
 ### Basic Usage
 
@@ -425,6 +444,11 @@ result = ctrl.move_shelf("Shelf A", "Meeting Room", timeout=120)
 result = ctrl.return_shelf("Shelf A", timeout=60)
 result = ctrl.dock_any_shelf_with_registration("Warehouse", timeout=120)
 
+# Free-pose movement — no registered location needed
+result = ctrl.move_to_pose(1.5, 2.0, 0.5, timeout=120)
+result = ctrl.move_forward(0.3, speed=0.1, timeout=30)
+result = ctrl.rotate_in_place(1.57, timeout=15)
+
 # Metrics collected during command execution
 m = ctrl.metrics
 print(f"polls={m.poll_count}, avg_rtt={sum(m.poll_rtt_list)/len(m.poll_rtt_list):.1f}ms")
@@ -432,6 +456,24 @@ ctrl.reset_metrics()
 
 ctrl.stop()
 ```
+
+### Movement API
+
+All methods return a result dict of the form
+`{"ok": bool, "action": str, "target": str, "elapsed": float, ...}`.
+On failure, `error_code` and `error` (with description) are populated.
+On deadline expiry, `{"ok": False, "error": "TIMEOUT", "timeout": <seconds>}`.
+
+| Method | Notes |
+|--------|-------|
+| `move_to_location(name, *, timeout=120, ...)` | Move to a registered location |
+| `return_home(*, timeout=60, ...)` | Return to charger |
+| `move_shelf(shelf, location, *, timeout=120, ...)` | Pick + deliver a shelf (enables shelf-drop monitor) |
+| `return_shelf(shelf="", *, timeout=60, ...)` | Return a shelf to its home |
+| `dock_any_shelf_with_registration(location, dock_forward=False, *, timeout=120, ...)` | Dock + register an unknown shelf at a location |
+| `move_to_pose(x, y, yaw, *, timeout=120, ...)` | **Free-pose move** — target is absolute map coords, not a named location. Use this for patrols whose points are stored as raw `(x, y, yaw)` |
+| `move_forward(distance_meter, *, speed=0.1, mute_sensors=False, timeout=60, ...)` | Forward (positive) / backward (negative). `mute_sensors=True` bypasses safety sensors (3.16.1+) |
+| `rotate_in_place(angle_radian, *, timeout=30, ...)` | Rotate (positive = counter-clockwise) |
 
 ### Constructor Parameters
 
@@ -449,10 +491,13 @@ ctrl = RobotController(
 
 | Use Case | Recommended |
 |----------|-------------|
-| Simple one-shot command | `KachakaCommands` |
-| Multi-step patrol with metrics | `RobotController` |
-| Background state monitoring | `RobotController` |
-| Blocking call with `@with_retry` | `KachakaCommands` |
+| Production service / patrol / dashboard | `RobotController` |
+| Anything driven by an upstream API where a hung thread is unacceptable | `RobotController` |
+| Free-pose movement (patrol points stored as raw `x, y, yaw`) | `RobotController.move_to_pose` |
+| Background state monitoring (pose, battery, errors) | `RobotController.state` |
+| Need timeout / disconnect handling on a command | `RobotController` |
+| Interactive REPL / one-off utility script | `KachakaCommands` |
+| Need a command that `RobotController` doesn't expose (e.g. `speak`, `set_volume`, `switch_map`, torch / scan / shortcut) | `KachakaCommands` |
 
 ### Command Execution Flow
 

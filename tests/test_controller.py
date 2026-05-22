@@ -506,6 +506,49 @@ class TestOtherMovementCommands:
         pb_cmd = mock_client.stub.StartCommand.call_args[0][0].command
         assert pb_cmd.dock_any_shelf_with_registration_command.dock_forward is True
 
+    def test_move_to_pose(self):
+        ctrl, mock_client = self._make_ctrl_immediate_success()
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.move_to_pose(1.5, 2.0, 0.5, timeout=10)
+        assert result["ok"] is True
+        assert result["action"] == "move_to_pose"
+        assert "1.5" in result["target"]
+        pb_cmd = mock_client.stub.StartCommand.call_args[0][0].command
+        assert pb_cmd.HasField("move_to_pose_command")
+        assert pb_cmd.move_to_pose_command.x == 1.5
+        assert pb_cmd.move_to_pose_command.y == 2.0
+        assert pb_cmd.move_to_pose_command.yaw == 0.5
+
+    def test_move_forward(self):
+        ctrl, mock_client = self._make_ctrl_immediate_success()
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.move_forward(0.5, speed=0.2, timeout=10)
+        assert result["ok"] is True
+        assert result["action"] == "move_forward"
+        pb_cmd = mock_client.stub.StartCommand.call_args[0][0].command
+        assert pb_cmd.HasField("move_forward_command")
+        assert pb_cmd.move_forward_command.distance_meter == 0.5
+        assert pb_cmd.move_forward_command.speed == pytest.approx(0.2)
+        assert pb_cmd.move_forward_command.mute_sensors is False
+
+    def test_move_forward_mute_sensors(self):
+        ctrl, mock_client = self._make_ctrl_immediate_success()
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.move_forward(0.3, mute_sensors=True, timeout=10)
+        assert result["ok"] is True
+        pb_cmd = mock_client.stub.StartCommand.call_args[0][0].command
+        assert pb_cmd.move_forward_command.mute_sensors is True
+
+    def test_rotate_in_place(self):
+        ctrl, mock_client = self._make_ctrl_immediate_success()
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.rotate_in_place(1.57, timeout=10)
+        assert result["ok"] is True
+        assert result["action"] == "rotate_in_place"
+        pb_cmd = mock_client.stub.StartCommand.call_args[0][0].command
+        assert pb_cmd.HasField("rotate_in_place_command")
+        assert pb_cmd.rotate_in_place_command.angle_radian == pytest.approx(1.57)
+
 
 # ── Error Description Enrichment tests ────────────────────────────
 
