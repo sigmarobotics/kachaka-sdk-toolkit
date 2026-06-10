@@ -485,7 +485,9 @@ class TestRecoveryMetrics:
 
         latency = cs.stats["recovery_latency_ms"]
         assert latency is not None
-        assert latency > 0
+        # >= 0: with mocked instant captures the recovery can land in the
+        # same timer tick as the reconnect notification (flaked under load).
+        assert latency >= 0
 
     def test_recovery_latency_only_set_once_per_reconnect(self):
         """Second successful frame after reconnect should not update recovery_latency_ms."""

@@ -128,10 +128,17 @@ class KachakaConnection:
 
     @classmethod
     def remove(cls, target: str) -> None:
-        """Remove a connection from the pool (e.g. on permanent failure)."""
+        """Remove a connection from the pool, stopping its monitor thread.
+
+        Use on permanent failure or teardown (e.g. IP change). Without the
+        monitor stop, the auto-started health-check thread would keep
+        pinging the removed target forever.
+        """
         key = cls._normalise_target(target)
         with cls._pool_lock:
-            cls._pool.pop(key, None)
+            conn = cls._pool.pop(key, None)
+        if conn is not None:
+            conn.stop_monitoring()
 
     @classmethod
     def clear_pool(cls) -> None:

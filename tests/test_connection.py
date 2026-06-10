@@ -602,3 +602,19 @@ class TestLongPollTimeoutWiring:
             KachakaConnection.get("lpt-test", timeout=2.0,
                                   long_poll_timeout=6.0, monitor=False)
         mock_interceptor.assert_called_once_with(2.0, long_poll_timeout=6.0)
+
+
+class TestRemoveStopsMonitoring:
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_remove_stops_monitoring(self, mock_cls):
+        """remove() must stop the connection's monitor thread.
+
+        With auto-monitoring on by default, popping the pool entry without
+        stopping the monitor leaks a thread that pings the old IP forever
+        (hit by kachaka-gemini and visual-patrol teardown paths).
+        """
+        mock_cls.return_value = _healthy_mock_client()
+        conn = KachakaConnection.get("1.2.3.4")
+        assert conn._is_monitoring
+        KachakaConnection.remove("1.2.3.4")
+        assert not conn._is_monitoring, "remove() left the monitor thread running"
