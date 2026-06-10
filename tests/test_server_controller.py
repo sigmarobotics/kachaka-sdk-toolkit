@@ -157,7 +157,37 @@ class TestGetControllerState:
         expected_keys = {
             "ok", "battery_pct", "pose_x", "pose_y", "pose_theta",
             "is_command_running", "last_updated", "moving_shelf_id",
-            "shelf_dropped",
+            "shelf_dropped", "connection_state", "state_age_s",
+            "disconnected_for_s", "last_reconnect_ago_s",
         }
         assert expected_keys == set(result.keys())
         _controllers[_controller_key(ip)].stop()
+
+
+class TestConnectionStateSurfacing:
+    """Disconnection must be visible to MCP callers (BIZ-001)."""
+
+    def test_get_controller_state_includes_connection_fields(self):
+        from mcp_server.server import get_controller_state as gcs
+
+        conn, _ = _make_mock_conn()
+        ip = conn.target
+        with patch("mcp_server.server.KachakaConnection.get", return_value=conn):
+            start_controller(ip)
+        result = gcs(ip)
+        assert result["ok"] is True
+        assert result["connection_state"] in ("unknown", "connected", "disconnected")
+        assert "disconnected_for_s" in result
+        assert "state_age_s" in result
+
+    def test_get_connection_state_tool(self):
+        from mcp_server.server import get_connection_state
+
+        conn, _ = _make_mock_conn()
+        conn.start_monitoring(interval=0.05)
+        with patch("mcp_server.server.KachakaConnection.get", return_value=conn):
+            result = get_connection_state(conn.target)
+        assert result["ok"] is True
+        assert result["state"] == "connected"
+        assert result["monitoring"] is True
+        assert result["last_ok_ping_ago_s"] is not None

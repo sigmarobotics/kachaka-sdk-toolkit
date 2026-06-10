@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import TextContent
@@ -42,6 +43,23 @@ mcp = FastMCP(
 def ping_robot(ip: str) -> dict:
     """Test gRPC connectivity and return serial number + current pose."""
     return KachakaConnection.get(ip).ping()
+
+
+@mcp.tool()
+def get_connection_state(ip: str) -> dict:
+    """Real-time connection health: state, monitoring status, last-ping age.
+
+    state is "connected" / "disconnected" / "unknown" (first ping pending).
+    Use this to check whether the robot is reachable BEFORE issuing
+    commands, or to diagnose why a command returned an error.
+    """
+    conn = KachakaConnection.get(ip)
+    # First call after connect: give the initial health-check ping a
+    # moment to produce a verdict instead of reporting "unknown".
+    conn.wait_until_known(timeout=conn.timeout + 1.0)
+    info = conn.connection_info()
+    info["ok"] = True
+    return info
 
 
 @mcp.tool()
@@ -313,6 +331,7 @@ def get_controller_state(ip: str) -> dict:
     if ctrl is None:
         return {"ok": False, "error": "controller not started"}
     s = ctrl.state
+    now_perf = time.perf_counter()
     return {
         "ok": True,
         "battery_pct": s.battery_pct,
@@ -323,6 +342,18 @@ def get_controller_state(ip: str) -> dict:
         "last_updated": s.last_updated,
         "moving_shelf_id": s.moving_shelf_id,
         "shelf_dropped": s.shelf_dropped,
+        "connection_state": s.connection_state,
+        # How stale this snapshot is — large values mean the data above
+        # predates a disconnect and must not be trusted.
+        "state_age_s": round(time.time() - s.last_updated, 1) if s.last_updated else None,
+        "disconnected_for_s": (
+            round(now_perf - s.disconnected_at, 1)
+            if s.connection_state == "disconnected" and s.disconnected_at
+            else None
+        ),
+        "last_reconnect_ago_s": (
+            round(now_perf - s.last_reconnect_at, 1) if s.last_reconnect_at else None
+        ),
     }
 
 

@@ -61,7 +61,7 @@ graph TD
 - `ping()` tests connectivity and returns serial + pose.
 - `ensure_resolver()` initialises the name-to-ID mapping tables (idempotent).
 - `resolve_location(name_or_id)` and `resolve_shelf(name_or_id)` translate human-readable names into gRPC IDs. All resolution happens in this layer, **not** in the upstream SDK's resolver.
-- `start_monitoring(interval, on_state_change)` runs a background health-check thread that transitions between `ConnectionState.CONNECTED` and `ConnectionState.DISCONNECTED`.
+- Health monitoring **auto-starts in `get()`** (opt out with `monitor=False`): a background thread pings the robot (first ping immediately) and transitions `ConnectionState` between `UNKNOWN` / `CONNECTED` / `DISCONNECTED`. `start_monitoring(interval, on_state_change)` retunes the cadence or registers a callback while running. `connection_info()` returns a status snapshot (state, ping age, state-change age).
 - `wait_for_state(target_state, timeout)` blocks until a specific connection state is reached.
 - Two-tier device-info cache reduces redundant gRPC round-trips:
   - **Tier 1 (permanent)**: serial, version, error_definitions -- fetched once, never expires.
@@ -77,8 +77,9 @@ graph TD
 
 **Key responsibilities**:
 - `TimeoutInterceptor` injects a configurable deadline (default 5s) on all unary-unary gRPC calls.
-- Excludes long-polling methods (`StartCommand`, `GetLastCommandResult`, `GetCommandState`) that are expected to block.
-- Without this, a call to an unreachable robot blocks for 15--18 minutes (TCP retransmission timeout).
+- **Cursor-aware long-poll detection**: a `GetRequest` with `metadata.cursor != 0` is a server-held long-poll and gets `long_poll_timeout` (default 300s) — a bounded watchdog, not an exemption. Immediate reads (cursor==0) and `StartCommand` get the 5s default.
+- The channel additionally carries HTTP/2 keepalive options (15s ping / 5s timeout, pings allowed without data or active calls), so a silently dead transport fails in-flight calls fast and lets the channel re-dial.
+- Without this, a call to an unreachable robot blocks for 15--18 minutes (TCP retransmission timeout), and a wedged long-poll hangs forever.
 
 **Data flow**: `KachakaConnection` creates an intercepted gRPC channel -> `TimeoutInterceptor` wraps every unary call with a deadline -> the downstream `KachakaApiClient` operates on the intercepted channel.
 
@@ -97,7 +98,7 @@ graph TD
 - Auto-homing: `set_auto_homing(enabled)` -- enable/disable automatic return-to-charger
 - Control: `cancel_command`, `proceed`, `set_manual_control`, `set_velocity`, `stop`
 - Advanced command parameters: `_start_command_advanced()` supports `deferrable`, `lock_on_end_sec`, `undock_on_destination`
-- `poll_until_complete(timeout)` blocks until the current command finishes.
+- **Fire-and-accept contract**: movement/shelf wrappers pass `wait_for_completion=False` to the SDK and return on acceptance; `poll_until_complete(timeout)` is the timeout-protected completion driver (`speak` still blocks, bounded by `long_poll_timeout`).
 
 **Internal dependencies**: `connection.py` (for `KachakaConnection`), `error_handling.py` (`@with_retry`).
 
@@ -460,13 +461,14 @@ sequenceDiagram
 
 | Layer | Component | Behaviour | Timing |
 |-------|-----------|-----------|--------|
-| 1 | `TimeoutInterceptor` | Injects 5s deadline on all unary calls | Fires at exactly deadline |
-| 2 | `@with_retry` | Retries UNAVAILABLE/DEADLINE_EXCEEDED with exponential backoff | 3 attempts default |
-| 3 | `ConnectionState` monitoring | Background ping detects disconnect | ~7s (ping interval + timeout) |
-| 4 | `RobotController._state_loop` | Skips polling during DISCONNECTED | Immediate resume on CONNECTED |
-| 5 | `CameraStreamer._run` | Skips capture during DISCONNECTED | Immediate resume on CONNECTED |
+| 1 | `TimeoutInterceptor` | 5s deadline on unary calls; 300s watchdog on cursor long-polls | Fires at exactly deadline |
+| 2 | HTTP/2 keepalive | Declares silently dead transport dead; fails in-flight calls, channel re-dials | ≤60s macOS / ~20s Linux (measured) |
+| 3 | `@with_retry` | Retries UNAVAILABLE/DEADLINE_EXCEEDED with exponential backoff | 3 attempts default |
+| 4 | `ConnectionState` monitoring (auto-on) | Background ping detects disconnect | ~7s (ping interval + timeout) |
+| 5 | `RobotController._state_loop` | Skips polling during DISCONNECTED | Immediate resume on CONNECTED |
+| 6 | `CameraStreamer._run` | Skips capture during DISCONNECTED | Immediate resume on CONNECTED |
 
-The gRPC channel itself survives all disconnect types (client-side packet loss, server-side disconnection) and does not require rebuilding. Recovery is automatic once the network path is restored.
+Clean disconnects (RST/FIN) recover automatically with no channel rebuild. Silent drops (WiFi vanishing) wedge the old transport until keepalive declares it dead (≤~60s), after which the channel re-dials on its own. Robot firmware (3.16.x, measured) additionally cancels held long-polls after ~35--40s with `CANCELLED`, which the retry/poll layers absorb.
 
 `TransformStreamer` handles disconnects differently -- as a server-streaming RPC consumer, stream breaks naturally trigger its auto-reconnect logic with backoff.
 

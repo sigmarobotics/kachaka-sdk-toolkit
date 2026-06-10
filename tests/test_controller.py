@@ -163,16 +163,20 @@ class TestRobotControllerLifecycle:
         ctrl.stop()  # should not crash
 
     def test_state_survives_grpc_error(self):
+        # Battery (slow cycle) errors must not kill the polling thread nor
+        # block the fast cycle.  (Pose errors are no longer a good probe
+        # here: ping() uses pose, so a pose failure now correctly flips the
+        # connection to DISCONNECTED and polling is skipped by design.)
         conn, mock_client = _make_mock_conn()
-        mock_client.get_robot_pose.side_effect = Exception("network error")
+        mock_client.get_battery_info.side_effect = Exception("network error")
         ctrl = RobotController(conn, fast_interval=0.05, slow_interval=0.05)
         ctrl.start()
         time.sleep(0.2)
-        # Thread should still be alive despite fast-cycle errors
+        # Thread should still be alive despite slow-cycle errors
         assert ctrl._thread is not None and ctrl._thread.is_alive()
-        # Battery (slow cycle) should still update since only pose errors
+        # Pose (fast cycle) should still update since only battery errors
         state = ctrl.state
-        assert state.battery_pct == 85
+        assert state.pose_x == 1.0
         ctrl.stop()
 
 
@@ -1352,7 +1356,7 @@ class TestDisconnectHandling:
         ctrl = RobotController(conn)
 
         state = ctrl.state
-        assert state.connection_state == "connected"
+        assert state.connection_state == "unknown"
         assert state.disconnected_at is None
         assert state.last_reconnect_at is None
 
@@ -1418,8 +1422,13 @@ class TestDisconnectHandling:
         finally:
             ctrl.stop()
 
-    def test_stop_calls_stop_monitoring(self):
-        """stop() should unsubscribe from connection state changes."""
+    def test_stop_retunes_monitoring_to_default(self):
+        """stop() retunes shared monitoring to the default cadence.
+
+        It must NOT stop it — the pooled connection's state guarantee
+        outlives the controller, and an idle channel triggers server
+        GOAWAY (too_many_pings) under keepalive_permit_without_calls=1.
+        """
         conn, _ = _make_mock_conn()
         conn.start_monitoring = MagicMock()
         conn.stop_monitoring = MagicMock()
@@ -1429,7 +1438,8 @@ class TestDisconnectHandling:
         time.sleep(0.1)
         ctrl.stop()
 
-        conn.stop_monitoring.assert_called_once()
+        conn.stop_monitoring.assert_not_called()
+        conn.start_monitoring.assert_called_with(interval=5.0)
 
     def test_execute_command_proceeds_when_connected(self):
         """When connected, _execute_command should not call wait_for_state."""
@@ -1456,3 +1466,19 @@ class TestDisconnectHandling:
 
         assert result["ok"] is True
         conn.wait_for_state.assert_not_called()
+
+
+class TestStopKeepsConnectionMonitoring:
+    def test_stop_retunes_monitoring_instead_of_killing_it(self):
+        """ctrl.stop() must NOT stop the pooled connection's monitoring.
+
+        The connection-level guarantee (get() => state is real) outlives any
+        one controller, and an idle channel triggers server GOAWAY
+        (too_many_pings) under keepalive_permit_without_calls=1.
+        """
+        conn, _ = _make_mock_conn()
+        ctrl = RobotController(conn, fast_interval=0.05)
+        ctrl.start()
+        assert conn._is_monitoring
+        ctrl.stop()
+        assert conn._is_monitoring, "controller stop killed shared monitoring"

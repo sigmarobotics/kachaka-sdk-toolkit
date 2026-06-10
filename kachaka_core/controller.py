@@ -43,7 +43,7 @@ class RobotState:
     last_updated: float = 0.0
     moving_shelf_id: Optional[str] = None
     shelf_dropped: bool = False
-    connection_state: str = "connected"
+    connection_state: str = "unknown"
     disconnected_at: Optional[float] = None
     last_reconnect_at: Optional[float] = None
     errors: list[int] = field(default_factory=list)
@@ -188,6 +188,11 @@ class RobotController:
             interval=self._fast_interval,
             on_state_change=self._on_conn_state_change,
         )
+        # Seed from the authoritative state — the callback only fires on
+        # future transitions, so without this the snapshot would stay
+        # "unknown" until the first transition.
+        with self._state_lock:
+            self._state.connection_state = self._conn.state.value
         self._thread = threading.Thread(target=self._state_loop, daemon=True)
         self._thread.start()
         logger.info(
@@ -197,8 +202,15 @@ class RobotController:
         )
 
     def stop(self) -> None:
-        """Stop the background state polling thread. No-op if not running."""
-        self._conn.stop_monitoring()
+        """Stop the background state polling thread. No-op if not running.
+
+        The pooled connection's health monitoring is retuned back to the
+        default cadence rather than stopped: the connection-level state
+        guarantee outlives any one controller, and an idle channel would
+        trigger server GOAWAY (too_many_pings) under
+        ``keepalive_permit_without_calls=1``.
+        """
+        self._conn.start_monitoring(interval=5.0)
         if self._thread is None or not self._thread.is_alive():
             return
         self._stop_event.set()

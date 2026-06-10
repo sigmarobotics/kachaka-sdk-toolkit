@@ -90,6 +90,95 @@ class TestTimeoutInterceptor:
             assert captured["timeout"] == timeout_val
 
 
+class TestCursorAwareTimeouts:
+    """Long-poll detection is cursor-based, not method-name based.
+
+    A GetRequest with metadata.cursor != 0 is a server-held long-poll and
+    gets ``long_poll_timeout`` (bounded watchdog, not infinite). Everything
+    else — cursor==0 immediate reads, StartCommand, non-Get requests — gets
+    ``default_timeout``.
+    """
+
+    def _intercept(self, interceptor, method, request):
+        captured = {}
+
+        def fake_continuation(call_details, req):
+            captured["timeout"] = call_details.timeout
+            return "ok"
+
+        interceptor.intercept_unary_unary(
+            fake_continuation, FakeCallDetails(method=method), request
+        )
+        return captured["timeout"]
+
+    def test_cursor_long_poll_gets_long_poll_timeout(self):
+        from kachaka_api.generated import kachaka_api_pb2 as pb2
+
+        interceptor = TimeoutInterceptor(default_timeout=5.0, long_poll_timeout=300.0)
+        request = pb2.GetRequest(metadata=pb2.Metadata(cursor=12345))
+        timeout = self._intercept(
+            interceptor, "/kachaka_api.KachakaApi/GetLastCommandResult", request
+        )
+        assert timeout == 300.0
+
+    def test_cursor_zero_read_gets_default_timeout(self):
+        """GetCommandState with cursor=0 returns immediately — must NOT be exempt.
+
+        This is the 2026-05-18 incident gap: controller polling used
+        cursor=0 reads that the old method-name exemption left unbounded.
+        """
+        from kachaka_api.generated import kachaka_api_pb2 as pb2
+
+        interceptor = TimeoutInterceptor(default_timeout=5.0, long_poll_timeout=300.0)
+        request = pb2.GetRequest(metadata=pb2.Metadata(cursor=0))
+        timeout = self._intercept(
+            interceptor, "/kachaka_api.KachakaApi/GetCommandState", request
+        )
+        assert timeout == 5.0
+
+    def test_get_request_without_metadata_gets_default_timeout(self):
+        from kachaka_api.generated import kachaka_api_pb2 as pb2
+
+        interceptor = TimeoutInterceptor(default_timeout=5.0, long_poll_timeout=300.0)
+        timeout = self._intercept(
+            interceptor, "/kachaka_api.KachakaApi/GetCommandState", pb2.GetRequest()
+        )
+        assert timeout == 5.0
+
+    def test_start_command_gets_default_timeout(self):
+        """StartCommand just submits — it is quick and must have a deadline."""
+        from kachaka_api.generated import kachaka_api_pb2 as pb2
+
+        interceptor = TimeoutInterceptor(default_timeout=5.0, long_poll_timeout=300.0)
+        timeout = self._intercept(
+            interceptor, "/kachaka_api.KachakaApi/StartCommand", pb2.StartCommandRequest()
+        )
+        assert timeout == 5.0
+
+    def test_non_proto_request_gets_default_timeout(self):
+        interceptor = TimeoutInterceptor(default_timeout=5.0, long_poll_timeout=300.0)
+        timeout = self._intercept(interceptor, "/test/Method", b"raw-bytes")
+        assert timeout == 5.0
+
+    def test_explicit_timeout_wins_over_long_poll(self):
+        from kachaka_api.generated import kachaka_api_pb2 as pb2
+
+        interceptor = TimeoutInterceptor(default_timeout=5.0, long_poll_timeout=300.0)
+        captured = {}
+
+        def fake_continuation(call_details, req):
+            captured["timeout"] = call_details.timeout
+            return "ok"
+
+        request = pb2.GetRequest(metadata=pb2.Metadata(cursor=99))
+        interceptor.intercept_unary_unary(
+            fake_continuation,
+            FakeCallDetails(method="/kachaka_api.KachakaApi/GetCommandState", timeout=7.0),
+            request,
+        )
+        assert captured["timeout"] == 7.0
+
+
 class TestTimeoutInterceptorIntegration:
     """Integration test with real gRPC channel (localhost, no server)."""
 

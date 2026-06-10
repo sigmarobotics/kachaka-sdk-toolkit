@@ -67,7 +67,8 @@ class TestMovement:
 
         assert result["ok"] is True
         mock_client.move_to_pose.assert_called_once_with(
-            1.0, 2.0, 0.5, cancel_all=True, tts_on_success="", title=""
+            1.0, 2.0, 0.5,
+            wait_for_completion=False, cancel_all=True, tts_on_success="", title="",
         )
 
     def test_return_home(self):
@@ -603,7 +604,9 @@ class TestMoveForwardMuteSensors:
 
         result = KachakaCommands(conn).move_forward(0.5)
         assert result["ok"] is True
-        mock_client.move_forward.assert_called_once_with(0.5, speed=0.1)
+        mock_client.move_forward.assert_called_once_with(
+            0.5, speed=0.1, wait_for_completion=False,
+        )
 
     def test_mute_sensors_uses_start_command(self):
         mock_client = MagicMock()
@@ -689,3 +692,111 @@ class TestSwitchMapInvalidation:
             assert conn._cached_map_list is None
             assert conn._cached_map_image is None
             KachakaConnection.clear_pool()
+
+
+class TestFireAndAccept:
+    """Command wrappers must pass wait_for_completion=False to the SDK.
+
+    The SDK's blocking flow waits in an unbounded GetLastCommandResult
+    long-poll (2026-05-18 production hang). The toolkit owns completion via
+    poll_until_complete / RobotController, so every StartCommand-based
+    wrapper must return on acceptance.
+    """
+
+    def _kwargs(self, mock_method):
+        assert mock_method.call_count == 1
+        return mock_method.call_args.kwargs
+
+    def test_move_to_location_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.move_to_location.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).move_to_location("Kitchen")
+        assert self._kwargs(mock_client.move_to_location)["wait_for_completion"] is False
+
+    def test_move_to_pose_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.move_to_pose.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).move_to_pose(1.0, 2.0, 0.5)
+        assert self._kwargs(mock_client.move_to_pose)["wait_for_completion"] is False
+
+    def test_move_forward_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.move_forward.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).move_forward(0.5)
+        assert self._kwargs(mock_client.move_forward)["wait_for_completion"] is False
+
+    def test_rotate_in_place_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.rotate_in_place.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).rotate_in_place(1.57)
+        assert self._kwargs(mock_client.rotate_in_place)["wait_for_completion"] is False
+
+    def test_return_home_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.return_home.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).return_home()
+        assert self._kwargs(mock_client.return_home)["wait_for_completion"] is False
+
+    def test_move_shelf_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.move_shelf.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).move_shelf("Shelf A", "Room 1")
+        assert self._kwargs(mock_client.move_shelf)["wait_for_completion"] is False
+
+    def test_return_shelf_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.return_shelf.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).return_shelf("Shelf A")
+        assert self._kwargs(mock_client.return_shelf)["wait_for_completion"] is False
+
+    def test_dock_shelf_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.dock_shelf.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).dock_shelf()
+        assert self._kwargs(mock_client.dock_shelf)["wait_for_completion"] is False
+
+    def test_undock_shelf_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.undock_shelf.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).undock_shelf()
+        assert self._kwargs(mock_client.undock_shelf)["wait_for_completion"] is False
+
+    def test_dock_any_shelf_with_registration_fire_and_accept(self):
+        mock_client = MagicMock()
+        mock_client.dock_any_shelf_with_registration.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).dock_any_shelf_with_registration("Room 1")
+        assert (
+            self._kwargs(mock_client.dock_any_shelf_with_registration)[
+                "wait_for_completion"
+            ]
+            is False
+        )
+
+    def test_advanced_path_skips_completion_long_poll(self):
+        """_start_command_advanced callers must not enter the cursor wait loop."""
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = _wire_advanced_stub(mock_client)
+
+        result = KachakaCommands(conn).move_forward(0.5, mute_sensors=True)
+        assert result["ok"] is True
+        mock_stub.StartCommand.assert_called_once()
+        mock_stub.GetLastCommandResult.assert_not_called()
+
+    def test_speak_stays_blocking(self):
+        """speak keeps SDK default (blocking) — bounded by long_poll_timeout."""
+        mock_client = MagicMock()
+        mock_client.speak.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+        KachakaCommands(conn).speak("hello")
+        assert "wait_for_completion" not in mock_client.speak.call_args.kwargs

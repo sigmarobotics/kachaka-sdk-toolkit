@@ -31,6 +31,38 @@ class TestNormaliseTarget:
         assert KachakaConnection._normalise_target("kachaka-abc.local") == "kachaka-abc.local:26400"
 
 
+class TestChannelKeepalive:
+    """The gRPC channel must carry HTTP/2 keepalive options.
+
+    Without keepalive, a silent network drop (no TCP RST — e.g. WiFi
+    vanishing) leaves in-flight RPCs hanging until TCP retransmission
+    gives up (15–18 minutes measured).
+    """
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_channel_created_with_keepalive_options(self, mock_cls):
+        mock_cls.return_value = MagicMock()
+        with patch(
+            "kachaka_core.connection.grpc.insecure_channel",
+            wraps=grpc.insecure_channel,
+        ) as mock_chan:
+            KachakaConnection.get("keepalive-test")
+
+        assert mock_chan.call_count == 1
+        args, kwargs = mock_chan.call_args
+        options = dict(kwargs.get("options") or (args[1] if len(args) > 1 else []))
+        assert "grpc.keepalive_time_ms" in options
+        assert "grpc.keepalive_timeout_ms" in options
+        # Pings must keep flowing during a silent long-poll (no data frames),
+        # otherwise keepalive stops exactly when we need it.
+        assert options.get("grpc.http2.max_pings_without_data") == 0
+        # Pings must also flow when no call is in flight — short-deadline
+        # health pings fail fast and leave the channel idle, so without
+        # this a zombie transport is never declared dead and the channel
+        # never re-dials (E2E phase C regression).
+        assert options.get("grpc.keepalive_permit_without_calls") == 1
+
+
 class TestPool:
     @patch("kachaka_core.connection.KachakaApiClient")
     def test_same_ip_returns_same_instance(self, mock_cls):
@@ -164,18 +196,91 @@ class TestResolver:
         assert conn.resolve_location("unknown") == "unknown"
 
 
-class TestMonitoring:
-    @patch("kachaka_core.connection.KachakaApiClient")
-    def test_state_initially_connected(self, mock_cls):
-        mock_cls.return_value = MagicMock()
-        conn = KachakaConnection.get("1.2.3.4")
-        assert conn.state == ConnectionState.CONNECTED
+def _healthy_mock_client():
+    mock_client = MagicMock()
+    mock_client.get_robot_serial_number.return_value = "KCK-001"
+    mock_client.get_robot_pose.return_value = MagicMock(x=0, y=0, theta=0)
+    return mock_client
+
+
+class TestUnknownStateAndAutoMonitor:
+    """state must never lie: UNKNOWN until a ping proves otherwise, and
+    ``get()`` starts monitoring by default so naive callers see real state."""
 
     @patch("kachaka_core.connection.KachakaApiClient")
-    def test_no_monitoring_by_default(self, mock_cls):
-        mock_cls.return_value = MagicMock()
+    def test_state_unknown_without_monitoring(self, mock_cls):
+        mock_cls.return_value = _healthy_mock_client()
+        conn = KachakaConnection.get("1.2.3.4", monitor=False)
+        assert conn.state == ConnectionState.UNKNOWN
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_get_auto_starts_monitoring(self, mock_cls):
+        mock_cls.return_value = _healthy_mock_client()
         conn = KachakaConnection.get("1.2.3.4")
+        assert conn._is_monitoring
+        assert conn.wait_for_state(ConnectionState.CONNECTED, timeout=2.0)
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_monitor_false_opts_out(self, mock_cls):
+        mock_cls.return_value = _healthy_mock_client()
+        conn = KachakaConnection.get("1.2.3.4", monitor=False)
         assert conn._monitor_thread is None
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_first_ping_is_immediate(self, mock_cls):
+        """The health loop must ping at start, not after the first interval."""
+        mock_cls.return_value = _healthy_mock_client()
+        conn = KachakaConnection.get("1.2.3.4", monitor=False)
+        conn.start_monitoring(interval=60.0)
+        try:
+            assert conn.wait_for_state(ConnectionState.CONNECTED, timeout=2.0)
+        finally:
+            conn.stop_monitoring()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_start_monitoring_updates_callback_when_running(self, mock_cls):
+        """RobotController.start() wires its callback AFTER auto-monitoring
+        has begun — the late callback must still be registered."""
+        mock_client = _healthy_mock_client()
+        mock_cls.return_value = mock_client
+        conn = KachakaConnection.get("1.2.3.4")  # auto-monitoring, no callback
+        conn.wait_for_state(ConnectionState.CONNECTED, timeout=2.0)
+
+        transitions = []
+        conn.start_monitoring(interval=0.05, on_state_change=transitions.append)
+        try:
+            rpc_error = grpc.RpcError()
+            rpc_error.code = lambda: grpc.StatusCode.UNAVAILABLE
+            rpc_error.details = lambda: "gone"
+            mock_client.get_robot_serial_number.side_effect = rpc_error
+            assert conn.wait_for_state(ConnectionState.DISCONNECTED, timeout=2.0)
+            assert ConnectionState.DISCONNECTED in transitions
+        finally:
+            conn.stop_monitoring()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_connection_info_snapshot(self, mock_cls):
+        mock_cls.return_value = _healthy_mock_client()
+        conn = KachakaConnection.get("1.2.3.4")
+        conn.wait_for_state(ConnectionState.CONNECTED, timeout=2.0)
+        info = conn.connection_info()
+        assert info["target"] == "1.2.3.4:26400"
+        assert info["state"] == "connected"
+        assert info["monitoring"] is True
+        assert info["last_ok_ping_ago_s"] is not None
+        assert info["last_ok_ping_ago_s"] < 5.0
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_connection_info_unknown_before_monitoring(self, mock_cls):
+        mock_cls.return_value = _healthy_mock_client()
+        conn = KachakaConnection.get("1.2.3.4", monitor=False)
+        info = conn.connection_info()
+        assert info["state"] == "unknown"
+        assert info["monitoring"] is False
+        assert info["last_ok_ping_ago_s"] is None
+
+
+class TestMonitoring:
 
     @patch("kachaka_core.connection.KachakaApiClient")
     def test_monitoring_detects_disconnect(self, mock_cls):
@@ -478,3 +583,22 @@ class TestCacheTier2:
         assert mock_client.get_map_list.call_count == 2
         assert mock_client.get_current_map_id.call_count == 2
         assert mock_client.get_png_map.call_count == 2
+
+
+class TestLongPollTimeoutWiring:
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_long_poll_timeout_reaches_interceptor(self, mock_cls):
+        """get(long_poll_timeout=...) must be wired into TimeoutInterceptor.
+
+        Regression: HIL-1.2 found the constructor stored the value but
+        _ensure_connected built the interceptor without it.
+        """
+        from kachaka_core.interceptors import TimeoutInterceptor
+
+        mock_cls.return_value = _healthy_mock_client()
+        with patch(
+            "kachaka_core.connection.TimeoutInterceptor", wraps=TimeoutInterceptor
+        ) as mock_interceptor:
+            KachakaConnection.get("lpt-test", timeout=2.0,
+                                  long_poll_timeout=6.0, monitor=False)
+        mock_interceptor.assert_called_once_with(2.0, long_poll_timeout=6.0)

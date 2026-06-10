@@ -27,7 +27,19 @@ logger = logging.getLogger(__name__)
 
 
 class KachakaCommands:
-    """High-level command interface for a single Kachaka robot."""
+    """High-level command interface for a single Kachaka robot.
+
+    .. important:: **Fire-and-accept contract** (since 0.6.0)
+
+        Movement and shelf commands return as soon as the robot *accepts*
+        the command (``{"ok": True}`` = accepted, not completed).  Drive
+        completion with :meth:`poll_until_complete`, or use
+        ``RobotController`` for supervised execution with timeout.
+
+        Rationale: the SDK's blocking flow waits in a server-held
+        long-poll with no client deadline — a lost completion event hangs
+        the caller indefinitely (production incident 2026-05-18).
+    """
 
     def __init__(self, conn: KachakaConnection):
         self.conn = conn
@@ -125,10 +137,12 @@ class KachakaCommands:
                 cancel_all=cancel_all,
                 tts_on_success=tts_on_success,
                 title=title,
+                wait_for_completion=False,
             )
         else:
             result = self.sdk.move_to_location(
                 location_id,
+                wait_for_completion=False,
                 cancel_all=cancel_all,
                 tts_on_success=tts_on_success,
                 title=title,
@@ -149,6 +163,7 @@ class KachakaCommands:
         """Move to an absolute map coordinate ``(x, y, yaw)``."""
         result = self.sdk.move_to_pose(
             x, y, yaw,
+            wait_for_completion=False,
             cancel_all=cancel_all,
             tts_on_success=tts_on_success,
             title=title,
@@ -183,9 +198,11 @@ class KachakaCommands:
                     mute_sensors=True,
                 )
             )
-            result = self._start_command_advanced(cmd)
+            result = self._start_command_advanced(cmd, wait_for_completion=False)
         else:
-            result = self.sdk.move_forward(distance_meter, speed=speed)
+            result = self.sdk.move_forward(
+                distance_meter, speed=speed, wait_for_completion=False,
+            )
         return self._result_to_dict(result, action="move_forward", target=f"{distance_meter}m")
 
     @with_retry()
@@ -214,7 +231,7 @@ class KachakaCommands:
                 move_duration_sec=duration_sec,
             )
         )
-        result = self._start_command_advanced(cmd)
+        result = self._start_command_advanced(cmd, wait_for_completion=False)
         return self._result_to_dict(
             result,
             action="move_by_velocity_muted",
@@ -224,7 +241,7 @@ class KachakaCommands:
     @with_retry()
     def rotate_in_place(self, angle_radian: float) -> dict:
         """Rotate in place by *angle_radian* (positive = counter-clockwise)."""
-        result = self.sdk.rotate_in_place(angle_radian)
+        result = self.sdk.rotate_in_place(angle_radian, wait_for_completion=False)
         return self._result_to_dict(result, action="rotate_in_place", target=f"{angle_radian}rad")
 
     @with_retry()
@@ -237,6 +254,7 @@ class KachakaCommands:
     ) -> dict:
         """Return to charger."""
         result = self.sdk.return_home(
+            wait_for_completion=False,
             cancel_all=cancel_all,
             tts_on_success=tts_on_success,
             title=title,
@@ -288,11 +306,13 @@ class KachakaCommands:
                 title=title,
                 deferrable=deferrable,
                 lock_on_end_sec=lock_on_end_sec,
+                wait_for_completion=False,
             )
         else:
             result = self.sdk.move_shelf(
                 shelf_id,
                 location_id,
+                wait_for_completion=False,
                 cancel_all=cancel_all,
                 tts_on_success=tts_on_success,
                 title=title,
@@ -306,13 +326,13 @@ class KachakaCommands:
         """Return the shelf to its home location."""
         self.conn.ensure_resolver()
         shelf_id = self.conn.resolve_shelf(shelf_name) if shelf_name else ""
-        result = self.sdk.return_shelf(shelf_id, **kwargs)
+        result = self.sdk.return_shelf(shelf_id, wait_for_completion=False, **kwargs)
         return self._result_to_dict(result, action="return_shelf", target=shelf_name or "(current)")
 
     @with_retry()
     def dock_shelf(self, **kwargs) -> dict:
         """Dock the currently held shelf."""
-        result = self.sdk.dock_shelf(**kwargs)
+        result = self.sdk.dock_shelf(wait_for_completion=False, **kwargs)
         return self._result_to_dict(result, action="dock_shelf")
 
     @with_retry()
@@ -331,6 +351,7 @@ class KachakaCommands:
         result = self.sdk.dock_any_shelf_with_registration(
             location_id,
             dock_forward,
+            wait_for_completion=False,
             cancel_all=cancel_all,
             tts_on_success=tts_on_success,
             title=title,
@@ -344,7 +365,7 @@ class KachakaCommands:
     @with_retry()
     def undock_shelf(self, **kwargs) -> dict:
         """Undock the currently held shelf."""
-        result = self.sdk.undock_shelf(**kwargs)
+        result = self.sdk.undock_shelf(wait_for_completion=False, **kwargs)
         return self._result_to_dict(result, action="undock_shelf")
 
     @with_retry()

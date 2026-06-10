@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "kachaka",
-      "description": "Kachaka Robot SDK — 75 MCP tools for AI-driven robot control",
+      "description": "Kachaka Robot SDK — 76 MCP tools for AI-driven robot control",
       "version": "0.5.0",
       "source": {
         "source": "github",

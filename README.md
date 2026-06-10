@@ -1,6 +1,6 @@
 # kachaka-sdk-toolkit
 
-A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 75 tools for AI-driven robot control, and a Skill reference document for development-time agents.
+A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 76 tools for AI-driven robot control, and a Skill reference document for development-time agents.
 
 ## Overview
 
@@ -13,15 +13,15 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 ```mermaid
 graph TD
     subgraph Consumers
-        MCP["MCP Server<br/>(75 tools, stdio)"]
+        MCP["MCP Server<br/>(76 tools, stdio)"]
         SKILL["Skill .md"]
         APP["Your Script<br/>or App"]
     end
 
     subgraph kachaka_core["kachaka_core (shared)"]
-        CONN["connection.py<br/>Pool mgmt · Health check<br/>Resolver · Two-tier cache"]
-        INT["interceptors.py<br/>TimeoutInterceptor (5s default)<br/>gRPC deadline injection"]
-        CMD["commands.py — KachakaCommands<br/>Simple wrappers (may block on long-poll)<br/>Movement · Shelf · Speech · Torch · Map"]
+        CONN["connection.py<br/>Pool mgmt · Auto health monitor<br/>Keepalive · Resolver · Two-tier cache"]
+        INT["interceptors.py<br/>TimeoutInterceptor<br/>5s default · 300s long-poll watchdog"]
+        CMD["commands.py — KachakaCommands<br/>Fire-and-accept wrappers<br/>Movement · Shelf · Speech · Torch · Map"]
         QRY["queries.py<br/>Status · Camera intrinsics<br/>ToF · Locations · Map"]
         ERR["error_handling.py<br/>@with_retry<br/>Exponential backoff"]
         CAM["camera.py<br/>CameraStreamer (daemon thread)<br/>Detection overlay · Stats"]
@@ -54,8 +54,10 @@ graph TD
 ## Features
 
 - **Connection pooling** -- `KachakaConnection.get(ip)` returns a cached, thread-safe connection. Same IP always yields the same instance.
-- **gRPC timeout protection** -- `TimeoutInterceptor` injects a 5-second default deadline on every unary gRPC call, preventing indefinite blocking when the robot is unreachable (raw gRPC blocks 15--18 minutes without a deadline).
-- **Connection monitoring** -- `conn.start_monitoring()` runs a background health-check thread that detects disconnection within ~7 seconds and exposes a `ConnectionState` (CONNECTED / DISCONNECTED) with callbacks.
+- **gRPC timeout protection** -- `TimeoutInterceptor` injects a 5-second default deadline on every unary gRPC call, plus a bounded 300-second watchdog on cursor-based long-polls (which the upstream SDK leaves unbounded). No call can hang forever (raw gRPC blocks 15--18 minutes without a deadline).
+- **Connection monitoring (on by default)** -- `KachakaConnection.get()` auto-starts a background health-check thread that detects disconnection within ~7 seconds and exposes a `ConnectionState` (UNKNOWN / CONNECTED / DISCONNECTED) with callbacks. The state never lies: it reads UNKNOWN until the first ping proves otherwise.
+- **HTTP/2 keepalive** -- silent network drops (WiFi vanishing, no TCP RST) are detected at the transport layer, so wedged in-flight calls fail fast (~20 s on Linux via TCP_USER_TIMEOUT, measured 60 s on macOS) instead of hanging for 15+ minutes.
+- **Fire-and-accept commands** -- `KachakaCommands` movement/shelf wrappers return as soon as the robot accepts the command, bypassing the SDK's unbounded blocking long-poll. Completion is driven by `poll_until_complete()` or `RobotController` — both timeout-protected.
 - **Two-tier device-info cache** -- Tier 1 (permanent): serial, version, error_definitions. Tier 2 (semi-static, manually refreshable): shortcuts, maps, map images. Reduces redundant gRPC round-trips for data that rarely changes.
 - **Disconnect-aware components** -- Both `RobotController` and `CameraStreamer` skip gRPC calls while `ConnectionState.DISCONNECTED`, avoiding wasted timeout cycles during network outages.
 - **Automatic retry** -- Transient gRPC errors (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED) are retried with exponential backoff. Non-retryable errors fail immediately.
@@ -69,7 +71,7 @@ graph TD
 - **Map management** -- Export, import, switch, and create maps from ROS-style PNG occupancy grids. `import_image_as_map` uses gRPC `stream_unary` directly for chunked image upload.
 - **Torch control** -- Set front/back LED torch intensity (0--255) for illumination.
 - **Laser scan** -- Activate on-demand LiDAR scans for a configurable duration.
-- **MCP Server** -- 75 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
+- **MCP Server** -- 76 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
 - **Skill document** -- A self-contained reference (`skills/kachaka-sdk/SKILL.md`) for development-time LLM agents.
 
 ## Tech Stack
@@ -166,7 +168,8 @@ conn = KachakaConnection.get("192.168.1.100:26400")  # Explicit port (same insta
 conn.ping()             # -> {"ok": True, "serial": "...", "pose": {...}}
 conn.ensure_resolver()  # Initialize name-to-ID resolver (idempotent)
 conn.client             # Raw KachakaApiClient for direct SDK access
-conn.state              # ConnectionState.UNKNOWN until monitoring starts
+conn.state              # Real-time ConnectionState (monitoring auto-starts)
+conn.connection_info()  # {"state": ..., "monitoring": ..., "last_ok_ping_ago_s": ...}
 
 KachakaConnection.remove("192.168.1.100")  # Remove from pool
 KachakaConnection.clear_pool()             # Drop all connections (for tests)
@@ -174,30 +177,47 @@ KachakaConnection.clear_pool()             # Drop all connections (for tests)
 
 #### Timeout Protection
 
-Every gRPC call is automatically wrapped by `TimeoutInterceptor` with a 5-second default deadline. Without this, a call to an unreachable robot blocks for 15--18 minutes (TCP retransmission timeout). The timeout is configurable:
+Every gRPC call is automatically wrapped by `TimeoutInterceptor`. Detection is **cursor-aware**: a `GetRequest` with `metadata.cursor != 0` asks the server to hold the call until new data arrives (long-poll), so it gets a bounded 300-second watchdog instead of the 5-second default. Everything else — immediate reads, `StartCommand`, all other RPCs — gets the 5-second deadline. Without this, a call to an unreachable robot blocks for 15--18 minutes (TCP retransmission timeout), and a long-poll whose completion event is lost hangs forever (observed in production: 82 minutes). Both timeouts are configurable:
 
 ```python
-conn = KachakaConnection.get("192.168.1.100", timeout=10.0)  # 10s deadline
+conn = KachakaConnection.get("192.168.1.100", timeout=10.0, long_poll_timeout=120.0)
 ```
+
+The channel also carries HTTP/2 keepalive options (`keepalive_time_ms=15000`, `keepalive_timeout_ms=5000`, pings permitted without data and without active calls), so a silently dead transport is declared dead and re-dialled instead of wedging every subsequent call.
 
 #### Connection Monitoring
 
-Start a background health-check thread that pings the robot periodically and maintains a `ConnectionState`:
+Monitoring starts automatically in `KachakaConnection.get()` — the health-check thread pings the robot every 5 seconds (first ping immediately) and maintains `conn.state`. Calling `start_monitoring()` again is safe: it registers a callback in place and retunes the cadence without losing state.
 
 ```python
+conn = KachakaConnection.get("192.168.1.100")          # monitoring already on
+conn.wait_until_known(timeout=10.0)                     # block until first ping verdict
+print(conn.state)                                       # CONNECTED / DISCONNECTED
+
 def on_state_change(new_state: ConnectionState):
-    print(f"Connection: {new_state.name}")  # CONNECTED or DISCONNECTED
+    print(f"Connection: {new_state.name}")
 
-conn.start_monitoring(interval=5.0, on_state_change=on_state_change)
-print(conn.state)  # ConnectionState.CONNECTED
-
-# Block until a specific state is reached
+conn.start_monitoring(interval=3.0, on_state_change=on_state_change)  # retune + callback
 conn.wait_for_state(ConnectionState.CONNECTED, timeout=30.0)
-
-conn.stop_monitoring()
+conn.connection_info()  # {"state": "connected", "monitoring": True,
+                        #  "state_changed_ago_s": 42.0, "last_ok_ping_ago_s": 1.2}
 ```
 
-Both `RobotController` and `CameraStreamer` can be wired to receive state change notifications via their `notify_state_change()` methods. When disconnected, they skip gRPC calls entirely instead of wasting 5 seconds per call on the interceptor timeout.
+Opt out with `KachakaConnection.get(ip, monitor=False)` — `conn.state` then stays `UNKNOWN`.
+
+Both `RobotController` and `CameraStreamer` skip gRPC calls entirely while disconnected instead of wasting 5 seconds per call on the interceptor timeout.
+
+#### Disconnect Behaviour (measured on real hardware)
+
+| Event after a silent network drop | Latency | Mechanism |
+|---|---|---|
+| `conn.state` flips to DISCONNECTED | ~7 s (interval 5 s + ping timeout) | health-check ping fails |
+| Immediate-read RPC fails | ≤ 5 s | per-call deadline |
+| In-flight long-poll released | ≤ 60 s on macOS, ~20 s on Linux | HTTP/2 keepalive kills dead transport |
+| Worst-case long-poll release | ≤ 300 s | `long_poll_timeout` watchdog |
+| Channel re-dials after network returns | ≤ ~60 s after restore | keepalive declares zombie transport dead, gRPC reconnects |
+
+Robot firmware note (3.16.x, measured): the server cancels a held long-poll after ~35--40 s with `CANCELLED` — independent of keepalive. The toolkit's retry/poll layers absorb this; raw SDK users will see the exception.
 
 #### Two-Tier Device-Info Cache
 
@@ -212,7 +232,7 @@ Reduces redundant gRPC round-trips for data that rarely changes:
 
 Robot action commands. All methods return `dict` with an `ok` key. All are decorated with `@with_retry`.
 
-> **Movement commands here block until completion via the SDK's long-poll loop.** If the upstream completion event is silently dropped, the call hangs indefinitely (no internal timeout). For production services, patrols, or any caller that cannot tolerate a wedged thread, use [`RobotController`](#robotcontroller) instead — it polls `GetCommandState` with a deadline and always returns within `timeout=` seconds. `KachakaCommands` is best for simple one-shot scripts and for actions that `RobotController` does not expose (TTS, volume, torch, map switch, shortcuts, etc.).
+> **Fire-and-accept contract (since 0.6.0):** movement and shelf commands return as soon as the robot *accepts* the command — `{"ok": True}` means accepted, not completed. This bypasses the SDK's blocking long-poll, which has no client deadline and hangs indefinitely if the completion event is lost (observed in production: 82 minutes). Drive completion with `poll_until_complete(timeout=...)`, or use [`RobotController`](#robotcontroller) for supervised execution — it polls with a deadline and always returns within `timeout=` seconds. (`speak()` still blocks until the utterance finishes, bounded by `long_poll_timeout`.) `KachakaCommands` remains the home of actions `RobotController` does not expose (TTS, volume, torch, map switch, shortcuts, etc.).
 
 | Method | Description |
 |--------|-------------|
@@ -612,7 +632,7 @@ annotated = det.annotate_frame(raw, result["objects"])
 
 ## MCP Server
 
-The MCP Server exposes 75 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
+The MCP Server exposes 76 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
 
 ### Running the Server
 
@@ -644,11 +664,12 @@ Add to your Claude Desktop `config.json`:
 
 All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is appended automatically.
 
-#### Connection (2 tools)
+#### Connection (3 tools)
 
 | Tool | Description |
 |------|-------------|
 | `ping_robot` | Test connectivity, return serial + pose |
+| `get_connection_state` | Real-time connection health: state (connected/disconnected/unknown), monitoring status, last-ping age, time since last state change |
 | `disconnect_robot` | Remove from connection pool |
 
 #### Status Queries (5 tools)
@@ -701,7 +722,7 @@ The controller tools expose `RobotController` through the MCP server, providing 
 |------|-------------|
 | `start_controller` | Start background state polling (idempotent) |
 | `stop_controller` | Stop and remove controller |
-| `get_controller_state` | Full state snapshot (pose, battery, shelf, command) |
+| `get_controller_state` | Full state snapshot (pose, battery, shelf, command, connection_state, snapshot age, disconnect duration) |
 | `controller_move_to_location` | Move to location via controller |
 | `controller_move_shelf` | Move shelf via controller (auto-starts shelf monitor) |
 | `controller_return_shelf` | Return shelf via controller (auto-stops shelf monitor) |
@@ -1064,7 +1085,7 @@ graph LR
 
     subgraph mcp["mcp_server/ — MCP Server layer"]
         M_INIT["__init__.py"]
-        M_SRV["server.py — 75 tools, stdio transport"]
+        M_SRV["server.py — 76 tools, stdio transport"]
     end
 
     subgraph skills["skills/kachaka-sdk/ — Plugin skill"]

@@ -13,3 +13,5 @@ data/
 scripts/
 docs/plans/
 docs/superpowers/
+.sigma/
+wireshark capture/

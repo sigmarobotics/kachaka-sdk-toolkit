@@ -26,8 +26,13 @@ logger = logging.getLogger(__name__)
 
 
 class ConnectionState(enum.Enum):
-    """Connection health state (two-state: no rebuild needed)."""
+    """Connection health state (no channel rebuild needed on transitions).
 
+    ``UNKNOWN`` is the initial state before the first health-check ping —
+    it means "no evidence yet", never "assumed reachable".
+    """
+
+    UNKNOWN = "unknown"
     CONNECTED = "connected"
     DISCONNECTED = "disconnected"
 
@@ -45,9 +50,15 @@ class KachakaConnection:
     _pool: dict[str, KachakaConnection] = {}
     _pool_lock = threading.Lock()
 
-    def __init__(self, target: str, timeout: float = 5.0):
+    def __init__(
+        self,
+        target: str,
+        timeout: float = 5.0,
+        long_poll_timeout: float = 300.0,
+    ):
         self.target = self._normalise_target(target)
         self.timeout = timeout
+        self.long_poll_timeout = long_poll_timeout
         self._client: Optional[KachakaApiClient] = None
         self._client_lock = threading.Lock()
         self._resolver_ready = False
@@ -69,38 +80,50 @@ class KachakaConnection:
         self._cached_map_image: Optional[dict] = None
 
         # ── Monitoring state ──
-        self._state = ConnectionState.CONNECTED
+        self._state = ConnectionState.UNKNOWN
         self._state_lock = threading.Lock()
         self._state_condition = threading.Condition(self._state_lock)
         self._on_state_change: Optional[Callable[[ConnectionState], None]] = None
         self._monitor_thread: Optional[threading.Thread] = None
         self._monitor_stop = threading.Event()
+        self._monitor_interval: float = 0.0
+        self._state_changed_at: Optional[float] = None
+        self._last_ping_ok_at: Optional[float] = None
 
     # ── Pool management ──────────────────────────────────────────────
 
     @classmethod
-    def get(cls, target: str, timeout: float = 5.0) -> KachakaConnection:
+    def get(
+        cls,
+        target: str,
+        timeout: float = 5.0,
+        *,
+        monitor: bool = True,
+        monitor_interval: float = 5.0,
+        long_poll_timeout: float = 300.0,
+    ) -> KachakaConnection:
         """Get or create a pooled connection for *target*.
 
-        .. tip::
-            Call :meth:`start_monitoring` after ``get()`` to enable
-            real-time :attr:`state` updates.  Without monitoring,
-            ``state`` will always read ``CONNECTED`` regardless of
-            actual connectivity::
+        Background health monitoring starts automatically (``monitor=True``)
+        so :attr:`state` reflects real connectivity without further setup::
 
-                conn = KachakaConnection.get("192.168.1.100")
-                conn.start_monitoring()          # ← enables conn.state
-                print(conn.state)                # CONNECTED or DISCONNECTED
+            conn = KachakaConnection.get("192.168.1.100")
+            print(conn.state)   # UNKNOWN until first ping, then
+                                # CONNECTED / DISCONNECTED in real time
 
-            If you need a callback on state transitions, pass
-            ``on_state_change`` to :meth:`start_monitoring`.
+        Pass ``monitor=False`` to opt out (state then stays ``UNKNOWN``).
+        If you need a callback on state transitions, call
+        :meth:`start_monitoring` with ``on_state_change`` — it can be
+        wired even while monitoring is already running.
         """
         key = cls._normalise_target(target)
         with cls._pool_lock:
             if key not in cls._pool:
-                cls._pool[key] = cls(key, timeout)
+                cls._pool[key] = cls(key, timeout, long_poll_timeout)
             conn = cls._pool[key]
         conn._ensure_connected()
+        if monitor:
+            conn.start_monitoring(interval=monitor_interval)
         return conn
 
     @classmethod
@@ -112,9 +135,12 @@ class KachakaConnection:
 
     @classmethod
     def clear_pool(cls) -> None:
-        """Drop every pooled connection. Useful in tests."""
+        """Drop every pooled connection (stopping their monitors). Useful in tests."""
         with cls._pool_lock:
+            conns = list(cls._pool.values())
             cls._pool.clear()
+        for conn in conns:
+            conn.stop_monitoring()
 
     # ── Client access ────────────────────────────────────────────────
 
@@ -133,6 +159,7 @@ class KachakaConnection:
             sdk = self.client
             serial = sdk.get_robot_serial_number()
             pose = sdk.get_robot_pose()
+            self._last_ping_ok_at = time.time()
             return {
                 "ok": True,
                 "serial": serial,
@@ -197,7 +224,9 @@ class KachakaConnection:
 
         This is the **recommended way** for external code to check whether
         the robot is reachable.  The value is updated in real-time by the
-        monitoring thread (see :meth:`start_monitoring`).
+        monitoring thread (started automatically by :meth:`get`).  It reads
+        ``UNKNOWN`` only before the first health-check ping completes (or
+        when monitoring was explicitly opted out with ``monitor=False``).
 
         .. note::
             ``RobotController.state.connection_state`` is an *internal* copy
@@ -218,24 +247,32 @@ class KachakaConnection:
         interval: float = 5.0,
         on_state_change: Optional[Callable[[ConnectionState], None]] = None,
     ) -> None:
-        """Start background health-check loop.
+        """Start (or retune) the background health-check loop.
 
-        **You must call this** if you want :attr:`state` to reflect
-        real connectivity.  Without monitoring, ``state`` is always
-        ``CONNECTED``.
+        :meth:`get` calls this automatically, so most code never needs to.
+        Call it explicitly to register a state-transition callback or to
+        change the ping cadence.
 
         Args:
             interval: Seconds between pings (default 5).
-            on_state_change: Called on CONNECTED ↔ DISCONNECTED transitions.
+            on_state_change: Called on state transitions.  ``None`` keeps
+                any previously registered callback.
 
         .. note::
-            Idempotent — calling again while already running is a no-op.
-            ``RobotController.start()`` calls this internally, so if you
-            are using a controller you do not need to call it separately.
+            Safe to call while already running: the callback is updated
+            in place, and a different *interval* restarts the loop at the
+            new cadence.  ``RobotController.start()`` relies on this to
+            wire its callback after auto-monitoring has begun.
         """
+        if on_state_change is not None:
+            self._on_state_change = on_state_change
         if self._monitor_thread is not None and self._monitor_thread.is_alive():
-            return
-        self._on_state_change = on_state_change
+            if interval == self._monitor_interval:
+                return
+            # Cadence change — restart the loop thread.
+            self._monitor_stop.set()
+            self._monitor_thread.join(timeout=10.0)
+        self._monitor_interval = interval
         self._monitor_stop.clear()
         self._monitor_thread = threading.Thread(
             target=self._health_check_loop,
@@ -269,6 +306,17 @@ class KachakaConnection:
                 timeout=timeout,
             )
 
+    def wait_until_known(self, timeout: float | None = None) -> bool:
+        """Block until the state is no longer UNKNOWN (first ping done).
+
+        Returns True if a known state was reached, False on timeout.
+        """
+        with self._state_condition:
+            return self._state_condition.wait_for(
+                lambda: self._state != ConnectionState.UNKNOWN,
+                timeout=timeout,
+            )
+
     def _set_state(self, new_state: ConnectionState) -> None:
         """Update state and notify waiters + callback."""
         with self._state_condition:
@@ -276,6 +324,7 @@ class KachakaConnection:
                 return
             old = self._state
             self._state = new_state
+            self._state_changed_at = time.time()
             self._state_condition.notify_all()
         logger.info("Connection %s: %s → %s", self.target, old.value, new_state.value)
         if self._on_state_change is not None:
@@ -285,13 +334,34 @@ class KachakaConnection:
                 logger.exception("on_state_change callback error")
 
     def _health_check_loop(self, interval: float) -> None:
-        """Daemon thread: ping periodically, update state."""
-        while not self._monitor_stop.wait(timeout=interval):
+        """Daemon thread: ping immediately, then periodically; update state."""
+        while True:
             result = self.ping()
             if result["ok"]:
                 self._set_state(ConnectionState.CONNECTED)
             else:
                 self._set_state(ConnectionState.DISCONNECTED)
+            if self._monitor_stop.wait(timeout=interval):
+                return
+
+    def connection_info(self) -> dict:
+        """Snapshot of connectivity status for health endpoints / MCP tools.
+
+        Ages are in seconds; ``None`` means "never happened yet".
+        """
+        now = time.time()
+        with self._state_lock:
+            state = self._state
+            changed_at = self._state_changed_at
+        last_ok = self._last_ping_ok_at
+        return {
+            "target": self.target,
+            "state": state.value,
+            "monitoring": self._is_monitoring,
+            "monitor_interval": self._monitor_interval if self._is_monitoring else None,
+            "state_changed_ago_s": round(now - changed_at, 1) if changed_at else None,
+            "last_ok_ping_ago_s": round(now - last_ok, 1) if last_ok else None,
+        }
 
     # ── Device info cache (Tier 1 — permanent) ──────────────────────
 
@@ -457,9 +527,26 @@ class KachakaConnection:
             # interceptor.  The SDK never sets per-call timeouts, so without
             # this, any gRPC call can block indefinitely on server-side
             # disconnects (e.g. robot WiFi drop — measured 522s in testing).
+            #
+            # HTTP/2 keepalive makes in-flight RPCs (including bounded
+            # long-polls) fail fast with UNAVAILABLE on a silent transport
+            # death instead of waiting out their deadline.
+            # max_pings_without_data=0 keeps pings flowing during a silent
+            # long-poll; tolerance verified against real robot firmware in
+            # tests/hil/test_disconnect.py.
+            channel_options = [
+                ("grpc.keepalive_time_ms", 15000),
+                ("grpc.keepalive_timeout_ms", 5000),
+                ("grpc.http2.max_pings_without_data", 0),
+                # Probe even when no call is in flight — short-deadline
+                # health pings leave the channel idle between attempts, and
+                # without this a zombie transport (silent drop) is never
+                # declared dead, so the channel never re-dials.
+                ("grpc.keepalive_permit_without_calls", 1),
+            ]
             intercepted_channel = grpc.intercept_channel(
-                grpc.insecure_channel(self.target),
-                TimeoutInterceptor(self.timeout),
+                grpc.insecure_channel(self.target, options=channel_options),
+                TimeoutInterceptor(self.timeout, long_poll_timeout=self.long_poll_timeout),
             )
             self._client.stub = KachakaApiStub(intercepted_channel)
 

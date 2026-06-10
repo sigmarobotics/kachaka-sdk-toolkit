@@ -48,17 +48,14 @@ from kachaka_core.connection import KachakaConnection, ConnectionState
 from kachaka_core.commands import KachakaCommands
 from kachaka_core.queries import KachakaQueries
 
-# 1. Connect (port 26400 appended automatically)
+# 1. Connect (port 26400 appended automatically; health monitoring auto-starts)
 conn = KachakaConnection.get("192.168.1.100")
 
-# 2. Start background monitoring (enables conn.state + lazy cache population)
-conn.start_monitoring(interval=5.0)
-
-# 3. Initialise name→ID resolver (required before name-based commands)
+# 2. Initialise name→ID resolver (required before name-based commands)
 conn.ensure_resolver()
 
 # Now available:
-# conn.state    → ConnectionState.CONNECTED / DISCONNECTED (real-time)
+# conn.state    → ConnectionState.UNKNOWN / CONNECTED / DISCONNECTED (real-time)
 # conn.serial   → "KCK-XXXX" (lazy-fetched, permanent cache)
 # conn.version  → "3.15.4" (lazy-fetched, permanent cache)
 
@@ -98,21 +95,22 @@ KachakaConnection.remove("192.168.1.100")
 
 ## Connection Monitoring
 
-`start_monitoring()` runs a background daemon thread that pings the robot at a fixed interval and updates `conn.state` in real-time. **You must call this** if you want `conn.state` to reflect actual connectivity — without it, `state` always reads `CONNECTED`.
+Monitoring **starts automatically** in `KachakaConnection.get()` — a daemon thread pings the robot every 5 s (first ping immediately) and updates `conn.state` in real-time. The state reads `UNKNOWN` only before the first ping verdict (or with `monitor=False`).
 
 ```python
 from kachaka_core.connection import KachakaConnection, ConnectionState
 
-conn = KachakaConnection.get("192.168.1.100")
+conn = KachakaConnection.get("192.168.1.100")   # monitoring already on
 
-# Start background health-check loop
-conn.start_monitoring(interval=5.0)
-
-# Real-time state (thread-safe read)
+conn.wait_until_known(timeout=10.0)   # block until the first ping verdict
 if conn.state == ConnectionState.CONNECTED:
     print("Robot online")
 else:
     print("Robot offline")
+
+conn.connection_info()
+# {"target": "...", "state": "connected", "monitoring": True,
+#  "monitor_interval": 5.0, "state_changed_ago_s": 42.0, "last_ok_ping_ago_s": 1.2}
 ```
 
 ### With state change callback
@@ -125,13 +123,14 @@ def on_change(new_state: ConnectionState):
         print("✓ Robot reconnected")
 
 conn.start_monitoring(interval=5.0, on_state_change=on_change)
+# Safe while already running: registers the callback in place; a different
+# interval restarts the loop at the new cadence.
 ```
 
 ### Blocking wait for connection
 
 ```python
 # Wait up to 10s for robot to come online
-conn.start_monitoring()
 if conn.wait_for_state(ConnectionState.CONNECTED, timeout=10.0):
     print("Robot ready")
 else:
@@ -140,8 +139,9 @@ else:
 
 ### Lifecycle notes
 
-- **Idempotent** — calling `start_monitoring()` again while running is a no-op
-- **`RobotController.start()` calls this internally** — but only when controller starts. If you need `conn.state` before the first patrol (e.g., on app startup for health check API), call `start_monitoring()` explicitly at startup
+- **Auto-started by `get()`** — opt out with `KachakaConnection.get(ip, monitor=False)`
+- **Re-callable** — calling `start_monitoring()` while running updates the callback and retunes the interval; same interval is a no-op
+- **`RobotController.start()` retunes to its fast_interval** and wires its own callback; `RobotController.stop()` retunes back to 5 s but never stops monitoring (the pooled connection's state guarantee outlives the controller, and an idle channel would trigger server GOAWAY under keepalive)
 - `stop_monitoring()` stops the background thread and clears the callback
 - The background thread is a daemon — auto-exits when the process ends
 
@@ -150,8 +150,8 @@ else:
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    conn = KachakaConnection.get(ROBOT_IP)
-    conn.start_monitoring(interval=5.0, on_state_change=handle_state_change)
+    conn = KachakaConnection.get(ROBOT_IP)              # monitoring auto-starts
+    conn.start_monitoring(on_state_change=handle_state_change)  # add callback
     conn.ensure_resolver()
     yield
     conn.stop_monitoring()
@@ -210,6 +210,8 @@ cmds.return_home()
 result = cmds.poll_until_complete(timeout=60.0)
 # {"ok": True, "error_code": 0, "command": "...", "elapsed": 12.3}
 ```
+
+> :warning: **Fire-and-accept contract (since 0.6.0)**: movement/shelf commands return as soon as the robot *accepts* the command (`{"ok": True}` = accepted, not completed). Drive completion with `poll_until_complete(timeout=...)` or use `RobotController`. This bypasses the SDK's unbounded blocking long-poll (82-minute production hang, 2026-05-18). `speak()` still blocks until done.
 
 > :x: **NEVER** call `sdk.move_to_location()` raw — use `cmds.move_to_location()` which auto-initialises the resolver. Raw SDK calls require manual name->ID resolution.
 > :x: **NEVER** write a `while` loop polling `get_command_state()` — use `cmds.poll_until_complete()` which handles timeout, command_id verification, and error enrichment.
@@ -421,29 +423,28 @@ result = ctrl.move_to_location("nonexistent")
 
 ### Network resilience (disconnect → auto-recovery)
 
-Five layers protect against network loss:
+Six layers protect against network loss:
 
-1. **TimeoutInterceptor (5s)** — every unary gRPC call gets a 5s deadline. Without this, calls block 15–18 minutes waiting for TCP timeout.
-2. **`@with_retry`** — retries `DEADLINE_EXCEEDED` / `UNAVAILABLE` / `RESOURCE_EXHAUSTED` with exponential backoff. Count mode (N attempts) or deadline mode (retry until wall-clock limit).
-3. **ConnectionState monitoring** — `conn.start_monitoring(interval=3.0)` runs a background ping; fires `on_state_change` callback on `CONNECTED ↔ DISCONNECTED` transitions. Detection latency ~7s.
-4. **RobotController** — `_state_loop` skips polling while `DISCONNECTED` (avoids wasting 5s per call on the interceptor timeout). `_execute_command` calls `conn.wait_for_state(CONNECTED)` before sending commands; retries `StartCommand` until deadline.
-5. **CameraStreamer** — `_run` loop skips capture while `DISCONNECTED`. Records `recovery_latency_ms` on first successful capture after reconnect.
+1. **TimeoutInterceptor (cursor-aware)** — immediate reads get a 5s deadline; cursor-based long-polls (`metadata.cursor != 0`) get a bounded 300s watchdog instead of the SDK's unbounded wait. No call can hang forever.
+2. **HTTP/2 keepalive** — `keepalive_time_ms=15000` / `keepalive_timeout_ms=5000`, pings permitted without data and without active calls. A silently dead transport (WiFi vanishing, no RST) is declared dead and the channel re-dials.
+3. **`@with_retry`** — retries `DEADLINE_EXCEEDED` / `UNAVAILABLE` / `RESOURCE_EXHAUSTED` with exponential backoff. Count mode (N attempts) or deadline mode (retry until wall-clock limit).
+4. **ConnectionState monitoring (auto-on)** — background ping fires `on_state_change` on transitions. Detection latency ~7s at the default 5s interval.
+5. **RobotController** — `_state_loop` skips polling while `DISCONNECTED`. `_execute_command` waits for `CONNECTED` before sending; per-poll deadlines keep the loop alive through a mid-command drop, returning a structured `TIMEOUT`/`DISCONNECTED` error within `timeout=`.
+6. **CameraStreamer** — `_run` loop skips capture while `DISCONNECTED`. Records `recovery_latency_ms` on first successful capture after reconnect. Check `latest_frame_age_s` to detect stale frames.
 
-Disconnect → recovery timeline:
+Measured timeline after a **silent** drop (real robot, firmware 3.16.x):
 
-```
-T+0s    Network lost
-T+0~5s  In-flight gRPC call hits 5s interceptor timeout → DEADLINE_EXCEEDED
-T+~7s   ConnectionState detects DISCONNECTED (ping interval)
-        → RobotController + CameraStreamer skip polling/capture
-T+Ns    Network restored
-T+N+0.2s ConnectionState detects CONNECTED
-         → RobotController._reconnect_probe() refreshes pose/battery
-         → CameraStreamer records recovery timestamp
-T+N+1s  Next poll/capture iteration succeeds normally
-```
+| Event | Latency | Mechanism |
+|---|---|---|
+| `conn.state` → DISCONNECTED | ~7 s | health ping fails |
+| Immediate-read RPC fails | ≤ 5 s | per-call deadline |
+| In-flight long-poll released | ≤ 60 s macOS / ~20 s Linux | keepalive kills dead transport |
+| Worst-case long-poll release | ≤ 300 s | long_poll_timeout watchdog |
+| Channel re-dial after network returns | ≤ ~60 s | keepalive + gRPC reconnect |
 
-**Important**: gRPC channel survives all disconnect types (client-side iptables, server-side WiFi drop) — no channel rebuild needed.
+**Firmware behaviour (measured)**: the robot's server cancels a held long-poll after ~35–40 s with `CANCELLED` — independent of keepalive. Toolkit retry/poll layers absorb it.
+
+**Important**: clean disconnects (RST/FIN) recover automatically with no channel rebuild; silent drops need keepalive to declare the old transport dead before the channel re-dials (up to ~60 s).
 
 ### Other notes
 
@@ -678,12 +679,12 @@ def my_new_command(ip: str, param: str) -> dict:
 | Detect objects in frame | `ObjectDetector.get_detections()` | Raw SDK `get_object_detection()` |
 | Draw detection bboxes | `ObjectDetector.annotate_frame(img, objects)` | PIL `ImageDraw` code |
 | Stream + detect + annotate | `CameraStreamer(detect=True, annotate=True)` | Separate detector + drawer |
-| Monitor connection health | `conn.start_monitoring(interval=5.0)` | Own ping loop |
+| Monitor connection health | Auto-on via `get()`; read `conn.state` / `connection_info()` | Own ping loop |
 | Handle disconnection | Built-in (5-layer resilience) | Custom reconnection logic |
 | Track camera frame stats | `streamer.stats` (drop rate, recovery) | Manual frame counters |
 | Shelf drop detection | `RobotController` (auto-tracks) | Poll `get_moving_shelf()` yourself |
 | Error descriptions | Auto-enriched in all results | `get_error_definitions()` + manual lookup |
-| gRPC timeout protection | `TimeoutInterceptor` (5s default) | Per-call `timeout=` parameter |
+| gRPC timeout protection | `TimeoutInterceptor` (5s default / 300s long-poll) | Per-call `timeout=` parameter |
 | Deploy script to robot | `playground_upload` + `playground_run` MCP tools | `scp` + `ssh` commands manually |
 | Offline route execution | Playground snippets (scaffold + IMU + route) | Custom scripts from scratch |
 

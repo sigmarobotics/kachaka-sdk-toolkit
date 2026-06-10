@@ -555,3 +555,18 @@ class TestLatestFrameBytes:
         cs = CameraStreamer(conn)
         cs._latest_frame = {"ok": False}
         assert cs.latest_frame_bytes is None
+
+
+class TestFrameStaleness:
+    def test_latest_frame_age(self):
+        """Callers must be able to tell how old the latest frame is."""
+        import time as _time
+        from unittest.mock import MagicMock as _MM
+
+        conn = _MM()
+        streamer = CameraStreamer(conn, interval=1.0)
+        assert streamer.latest_frame_age_s is None  # no frame yet
+        with streamer._lock:
+            streamer._latest_frame = {"ok": True, "timestamp": _time.time() - 3.0}
+        age = streamer.latest_frame_age_s
+        assert age is not None and 2.5 < age < 4.0

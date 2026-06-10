@@ -121,6 +121,19 @@ class CameraStreamer:
             return self._latest_frame
 
     @property
+    def latest_frame_age_s(self) -> float | None:
+        """Seconds since the latest frame was captured, or None if no frame.
+
+        After a disconnect, ``latest_frame`` keeps returning the last
+        pre-outage frame — check this age to detect stale data.
+        """
+        with self._lock:
+            frame = self._latest_frame
+        if frame is None or "timestamp" not in frame:
+            return None
+        return time.time() - frame["timestamp"]
+
+    @property
     def latest_frame_bytes(self) -> bytes | None:
         """Most recent frame as raw JPEG bytes. None if no frame available."""
         with self._lock:

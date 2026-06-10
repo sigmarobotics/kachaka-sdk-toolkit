@@ -35,33 +35,30 @@ class TimeoutInterceptor(grpc.UnaryUnaryClientInterceptor):
     """Add a default timeout to all unary-unary gRPC calls.
 
     If the call already has an explicit timeout, it is left unchanged.
-    Long-polling RPCs used by the SDK's blocking command flow are given a
-    much longer timeout so they can wait for robot movements to complete.
+
+    Long-poll detection is **cursor-based**: a request whose
+    ``metadata.cursor != 0`` asks the server to hold the call until new
+    data arrives, so it gets ``long_poll_timeout`` — a bounded watchdog
+    against silently wedged streams (a lost completion event once hung a
+    production client for 82 minutes; see .sigma incident 2026-05-18).
+    Everything else — cursor==0 immediate reads, StartCommand, and all
+    other RPCs — gets ``default_timeout``.
     """
 
-    # RPCs that block until a robot command finishes (long-polling).
-    # These must NOT have a timeout — movement distance is unbounded.
-    _LONG_POLL_METHODS = frozenset({
-        "/kachaka_api.KachakaApi/StartCommand",
-        "/kachaka_api.KachakaApi/GetLastCommandResult",
-        "/kachaka_api.KachakaApi/GetCommandState",
-    })
-
-    def __init__(self, default_timeout: float = 10.0):
+    def __init__(self, default_timeout: float = 10.0, long_poll_timeout: float = 300.0):
         self._default_timeout = default_timeout
+        self._long_poll_timeout = long_poll_timeout
 
     def intercept_unary_unary(self, continuation, client_call_details, request):
-        if client_call_details.timeout is None:
-            method = client_call_details.method
-            if method in self._LONG_POLL_METHODS:
-                return continuation(client_call_details, request)
-            new_details = _CallDetails(
-                method=client_call_details.method,
-                timeout=self._default_timeout,
-                metadata=client_call_details.metadata,
-                credentials=client_call_details.credentials,
-                wait_for_ready=client_call_details.wait_for_ready,
-                compression=client_call_details.compression,
-            )
-            return continuation(new_details, request)
-        return continuation(client_call_details, request)
+        if client_call_details.timeout is not None:
+            return continuation(client_call_details, request)
+        cursor = getattr(getattr(request, "metadata", None), "cursor", 0)
+        new_details = _CallDetails(
+            method=client_call_details.method,
+            timeout=self._long_poll_timeout if cursor else self._default_timeout,
+            metadata=client_call_details.metadata,
+            credentials=client_call_details.credentials,
+            wait_for_ready=client_call_details.wait_for_ready,
+            compression=client_call_details.compression,
+        )
+        return continuation(new_details, request)
