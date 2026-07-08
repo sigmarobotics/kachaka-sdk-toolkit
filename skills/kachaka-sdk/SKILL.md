@@ -29,9 +29,12 @@ This layer is shared with the MCP Server, ensuring conversation-tested behaviour
 `kachaka-sdk-toolkit` is published on **PyPI**. Install as a standard Python package:
 
 ```bash
-pip install kachaka-sdk-toolkit          # PyPI (production)
+pip install kachaka-sdk-toolkit          # PyPI (production) — kachaka_core only
+pip install 'kachaka-sdk-toolkit[mcp]'   # + MCP server (only if you run kachaka-mcp)
 pip install -e /path/to/local/checkout   # Editable (development)
 ```
+
+> The base package deliberately does **not** depend on the MCP stack (`mcp` -> `sse-starlette` -> `starlette`), so installing it into a FastAPI/starlette host project cannot break the host's pins. Only add `[mcp]` when the project itself runs the MCP server.
 
 In `requirements.txt` or `pyproject.toml`:
 ```
@@ -206,12 +209,15 @@ cmds.rotate_in_place(1.57)    # 90° counter-clockwise
 # Return to charger
 cmds.return_home()
 
-# Poll until command finishes
+# Poll until command finishes (completion verified against the command_id
+# of the most recently accepted command on this instance)
 result = cmds.poll_until_complete(timeout=60.0)
-# {"ok": True, "error_code": 0, "command": "...", "elapsed": 12.3}
+# {"ok": True, "error_code": 0, "command_id": "...", "elapsed": 12.3}
 ```
 
-> :warning: **Fire-and-accept contract (since 0.6.0)**: movement/shelf commands return as soon as the robot *accepts* the command (`{"ok": True}` = accepted, not completed). Drive completion with `poll_until_complete(timeout=...)` or use `RobotController`. This bypasses the SDK's unbounded blocking long-poll (82-minute production hang, 2026-05-18). `speak()` still blocks until done.
+> :warning: **Fire-and-accept contract (since 0.6.0)**: movement/shelf commands return as soon as the robot *accepts* the command (`{"ok": True}` = accepted, not completed; the result dict includes `command_id`). Drive completion with `poll_until_complete(timeout=...)` or use `RobotController`. This bypasses the SDK's unbounded blocking long-poll (82-minute production hang, 2026-05-18). `speak()` still blocks until done.
+
+> :warning: **poll on the SAME instance that dispatched** (since 0.7.0): `poll_until_complete` verifies completion against the tracked `command_id`. If you poll from a different `KachakaCommands` instance, pass `command_id=` explicitly (from the dispatch result dict) — an unverified poll can mistake the post-dispatch registration window (`PENDING` + empty command_id) for completion and report success in ~0 s (2026-07-07 field incident).
 
 > :x: **NEVER** call `sdk.move_to_location()` raw — use `cmds.move_to_location()` which auto-initialises the resolver. Raw SDK calls require manual name->ID resolution.
 > :x: **NEVER** write a `while` loop polling `get_command_state()` — use `cmds.poll_until_complete()` which handles timeout, command_id verification, and error enrichment.
@@ -260,12 +266,19 @@ queries.get_errors()        # {"ok": True, "errors": []}
 ## Camera
 
 ```python
-# Returns base64-encoded JPEG
+# Returns base64-encoded JPEG. fresh=True (default) waits for a frame
+# captured AFTER this call — the buffer may still hold a frame from before
+# the robot's last move (looks normal, shows the wrong place).
 img = queries.get_front_camera_image()
-# {"ok": True, "image_base64": "...", "format": "jpeg"}
+# {"ok": True, "image_base64": "...", "format": "jpeg", "fresh": True}
 
 img = queries.get_back_camera_image()
+
+# Pre-0.7 behaviour (return buffered frame immediately, no freshness check):
+img = queries.get_front_camera_image(fresh=False)
 ```
+
+> :warning: **Capture after movement**: keep `fresh=True` whenever the robot has just moved or rotated — with `fresh=False` the returned frame can predate the move even though pose already verifies on target (2026-07-07 field incident). For motion-blur-free shots, additionally sleep ~1 s after the move completes before capturing.
 
 ### Decoding the image
 

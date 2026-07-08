@@ -48,6 +48,7 @@ from mcp_server.server import (
     controller_move_shelf,
     controller_move_to_location,
     controller_return_shelf,
+    controller_rotate,
     get_controller_state,
     start_controller,
     stop_controller,
@@ -139,6 +140,28 @@ class TestControllerCommandWithoutStart:
         result = controller_move_to_location("10.0.0.1", "Kitchen")
         assert result["ok"] is False
         assert result["error"] == "controller not started"
+
+    def test_rotate_without_start(self):
+        result = controller_rotate("10.0.0.1", 1.57)
+        assert result["ok"] is False
+        assert result["error"] == "controller not started"
+
+
+class TestControllerRotate:
+    def test_rotate_delegates_to_controller(self):
+        conn, _ = _make_mock_conn()
+        ip = conn.target
+        with patch("mcp_server.server.KachakaConnection.get", return_value=conn):
+            start_controller(ip)
+        key = _controller_key(ip)
+        ctrl = _controllers[key]
+        with patch.object(
+            ctrl, "rotate_in_place", return_value={"ok": True, "action": "rotate_in_place"}
+        ) as mock_rotate:
+            result = controller_rotate(ip, 1.57)
+        assert result["ok"] is True
+        mock_rotate.assert_called_once_with(1.57)
+        ctrl.stop()
 
 
 class TestGetControllerState:

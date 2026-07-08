@@ -98,11 +98,11 @@ graph TD
 - Auto-homing: `set_auto_homing(enabled)` -- enable/disable automatic return-to-charger
 - Control: `cancel_command`, `proceed`, `set_manual_control`, `set_velocity`, `stop`
 - Advanced command parameters: `_start_command_advanced()` supports `deferrable`, `lock_on_end_sec`, `undock_on_destination`
-- **Fire-and-accept contract**: movement/shelf wrappers pass `wait_for_completion=False` to the SDK and return on acceptance; `poll_until_complete(timeout)` is the timeout-protected completion driver (`speak` still blocks, bounded by `long_poll_timeout`).
+- **Fire-and-accept contract**: movement/shelf wrappers dispatch `StartCommand` directly and return on acceptance, recording the accepted `command_id` (also included in the result dict); `poll_until_complete(timeout)` is the timeout-protected completion driver and verifies completion against that `command_id` — the idle state (`PENDING` + empty command_id) is indistinguishable from the post-StartCommand registration window, so unverified polling can false-complete in ~0 s (`speak` still blocks, bounded by `long_poll_timeout`).
 
 **Internal dependencies**: `connection.py` (for `KachakaConnection`), `error_handling.py` (`@with_retry`).
 
-**Data flow**: Caller -> `KachakaCommands` method -> name resolution via `KachakaConnection.resolve_*()` -> SDK gRPC call -> structured `dict` response.
+**Data flow**: Caller -> `KachakaCommands` method -> name resolution via `KachakaConnection.resolve_*()` -> `StartCommand` gRPC dispatch -> structured `dict` response (with `command_id`).
 
 ### kachaka_core/queries.py -- Read-only Queries
 

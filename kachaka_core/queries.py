@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import logging
 import math
+import time
 
 from kachaka_api.generated import kachaka_api_pb2 as pb2
 
@@ -184,19 +185,67 @@ class KachakaQueries:
 
     # ── Camera ───────────────────────────────────────────────────────
 
-    @with_retry()
-    def get_front_camera_image(self) -> dict:
-        """Compressed JPEG from the front camera, returned as base64."""
-        img = self.sdk.get_front_camera_ros_compressed_image()
+    def _capture_image(self, capture_fn, *, fresh: bool, timeout: float) -> dict:
+        """Grab one frame, optionally discarding buffered (stale) frames.
+
+        The camera stream lazy-starts and the server returns the *latest
+        buffered* frame — right after movement that buffer can still hold a
+        frame from the previous spot (2026-07-07 field incident: pose
+        verified on target, photo showed the departure point).
+
+        With ``fresh=True`` the first frame only serves as a baseline; the
+        method then polls until a frame with a newer header stamp arrives,
+        which proves it was captured *after* this call. Firmware that leaves
+        ``stamp_nsec`` at 0 falls back to detecting a change in frame bytes.
+        """
+        img = capture_fn()
+        if fresh:
+            baseline_stamp = img.header.stamp_nsec
+            baseline_data = img.data
+            deadline = time.time() + timeout
+            while True:
+                if time.time() >= deadline:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"no fresh frame within {timeout:.1f}s — the buffered "
+                            "frame may predate this request (camera stream stale "
+                            "or lazy-starting); retry, or pass fresh=False to "
+                            "accept the buffered frame"
+                        ),
+                    }
+                time.sleep(0.2)
+                img = capture_fn()
+                if img.header.stamp_nsec > baseline_stamp or (
+                    baseline_stamp == 0 and img.data != baseline_data
+                ):
+                    break
         b64 = base64.b64encode(img.data).decode()
-        return {"ok": True, "image_base64": b64, "format": img.format or "jpeg"}
+        return {"ok": True, "image_base64": b64, "format": img.format or "jpeg", "fresh": fresh}
 
     @with_retry()
-    def get_back_camera_image(self) -> dict:
-        """Compressed JPEG from the back camera, returned as base64."""
-        img = self.sdk.get_back_camera_ros_compressed_image()
-        b64 = base64.b64encode(img.data).decode()
-        return {"ok": True, "image_base64": b64, "format": img.format or "jpeg"}
+    def get_front_camera_image(self, fresh: bool = True, timeout: float = 5.0) -> dict:
+        """Compressed JPEG from the front camera, returned as base64.
+
+        ``fresh=True`` (default) waits for a frame captured *after* this
+        call — important right after movement, because the single-shot API
+        otherwise returns a buffered frame that may predate the move.
+        ``fresh=False`` returns the buffered frame immediately (pre-0.7
+        behaviour).
+        """
+        return self._capture_image(
+            self.sdk.get_front_camera_ros_compressed_image, fresh=fresh, timeout=timeout
+        )
+
+    @with_retry()
+    def get_back_camera_image(self, fresh: bool = True, timeout: float = 5.0) -> dict:
+        """Compressed JPEG from the back camera, returned as base64.
+
+        See :meth:`get_front_camera_image` for the ``fresh`` contract.
+        """
+        return self._capture_image(
+            self.sdk.get_back_camera_ros_compressed_image, fresh=fresh, timeout=timeout
+        )
 
     # ── Camera intrinsics ───────────────────────────────────────────
 

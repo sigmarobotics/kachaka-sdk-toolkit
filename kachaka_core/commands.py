@@ -32,9 +32,12 @@ class KachakaCommands:
     .. important:: **Fire-and-accept contract** (since 0.6.0)
 
         Movement and shelf commands return as soon as the robot *accepts*
-        the command (``{"ok": True}`` = accepted, not completed).  Drive
-        completion with :meth:`poll_until_complete`, or use
-        ``RobotController`` for supervised execution with timeout.
+        the command (``{"ok": True}`` = accepted, not completed).  Each
+        accepted command's ``command_id`` is included in the result dict
+        and tracked on the instance.  Drive completion with
+        :meth:`poll_until_complete` — it verifies completion against that
+        ``command_id`` — or use ``RobotController`` for supervised
+        execution with timeout.
 
         Rationale: the SDK's blocking flow waits in a server-held
         long-poll with no client deadline — a lost completion event hangs
@@ -44,6 +47,9 @@ class KachakaCommands:
     def __init__(self, conn: KachakaConnection):
         self.conn = conn
         self.sdk = conn.client
+        # command_id of the most recently accepted command — consumed by
+        # poll_until_complete for completion verification.
+        self._last_command_id: str = ""
 
     # ── Advanced command execution ────────────────────────────────────
 
@@ -57,11 +63,15 @@ class KachakaCommands:
         deferrable: bool = False,
         lock_on_end_sec: float = 0.0,
         wait_for_completion: bool = True,
-    ) -> pb2.Result:
+    ) -> tuple[pb2.Result, str]:
         """Low-level command dispatch with ``deferrable`` and ``lock_on_end`` support.
 
         These parameters are defined in the gRPC proto but not exposed by the
         official Python SDK convenience methods.
+
+        Returns ``(result, command_id)``.  The ``command_id`` of an accepted
+        command is also recorded on the instance so that
+        :meth:`poll_until_complete` can verify completion against it.
         """
         lock_on_end = None
         if lock_on_end_sec > 0:
@@ -76,15 +86,19 @@ class KachakaCommands:
             lock_on_end=lock_on_end,
         )
 
-        # Capture cursor before issuing the command
-        cursor_meta = pb2.Metadata(cursor=0)
-        cursor_meta.cursor = self.sdk.stub.GetCommandState(
-            pb2.GetRequest(metadata=cursor_meta)
-        ).metadata.cursor
+        cursor_meta = None
+        if wait_for_completion:
+            # Capture cursor before issuing the command
+            cursor_meta = pb2.Metadata(cursor=0)
+            cursor_meta.cursor = self.sdk.stub.GetCommandState(
+                pb2.GetRequest(metadata=cursor_meta)
+            ).metadata.cursor
 
         response = self.sdk.stub.StartCommand(request)
+        if response.result.success:
+            self._last_command_id = response.command_id
         if not response.result.success or not wait_for_completion:
-            return response.result
+            return response.result, response.command_id
 
         # Poll until our command_id appears in last result
         while True:
@@ -96,7 +110,7 @@ class KachakaCommands:
                 break
 
         result, _ = self.sdk.get_last_command_result()
-        return result
+        return result, response.command_id
 
     # ── Movement ─────────────────────────────────────────────────────
 
@@ -124,30 +138,20 @@ class KachakaCommands:
         self.conn.ensure_resolver()
         location_id = self.conn.resolve_location(location_name)
 
+        fields: dict = {"target_location_id": location_id}
         if source_location_name:
-            source_id = self.conn.resolve_location(source_location_name)
-            cmd = pb2.Command(
-                move_to_location_command=pb2.MoveToLocationCommand(
-                    target_location_id=location_id,
-                    source_location_id=source_id,
-                )
-            )
-            result = self._start_command_advanced(
-                cmd,
-                cancel_all=cancel_all,
-                tts_on_success=tts_on_success,
-                title=title,
-                wait_for_completion=False,
-            )
-        else:
-            result = self.sdk.move_to_location(
-                location_id,
-                wait_for_completion=False,
-                cancel_all=cancel_all,
-                tts_on_success=tts_on_success,
-                title=title,
-            )
-        return self._result_to_dict(result, action="move_to_location", target=location_name)
+            fields["source_location_id"] = self.conn.resolve_location(source_location_name)
+        cmd = pb2.Command(move_to_location_command=pb2.MoveToLocationCommand(**fields))
+        result, cid = self._start_command_advanced(
+            cmd,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+            wait_for_completion=False,
+        )
+        return self._result_to_dict(
+            result, action="move_to_location", target=location_name, command_id=cid
+        )
 
     @with_retry()
     def move_to_pose(
@@ -161,14 +165,17 @@ class KachakaCommands:
         title: str = "",
     ) -> dict:
         """Move to an absolute map coordinate ``(x, y, yaw)``."""
-        result = self.sdk.move_to_pose(
-            x, y, yaw,
-            wait_for_completion=False,
+        cmd = pb2.Command(move_to_pose_command=pb2.MoveToPoseCommand(x=x, y=y, yaw=yaw))
+        result, cid = self._start_command_advanced(
+            cmd,
             cancel_all=cancel_all,
             tts_on_success=tts_on_success,
             title=title,
+            wait_for_completion=False,
         )
-        return self._result_to_dict(result, action="move_to_pose", target=f"({x}, {y}, {yaw})")
+        return self._result_to_dict(
+            result, action="move_to_pose", target=f"({x}, {y}, {yaw})", command_id=cid
+        )
 
     @with_retry()
     def move_forward(
@@ -190,20 +197,17 @@ class KachakaCommands:
                 from a tight spot or pushing through a docking edge.
                 **Use with care** — collision detection is suppressed.
         """
-        if mute_sensors:
-            cmd = pb2.Command(
-                move_forward_command=pb2.MoveForwardCommand(
-                    distance_meter=distance_meter,
-                    speed=speed,
-                    mute_sensors=True,
-                )
+        cmd = pb2.Command(
+            move_forward_command=pb2.MoveForwardCommand(
+                distance_meter=distance_meter,
+                speed=speed,
+                mute_sensors=mute_sensors,
             )
-            result = self._start_command_advanced(cmd, wait_for_completion=False)
-        else:
-            result = self.sdk.move_forward(
-                distance_meter, speed=speed, wait_for_completion=False,
-            )
-        return self._result_to_dict(result, action="move_forward", target=f"{distance_meter}m")
+        )
+        result, cid = self._start_command_advanced(cmd, wait_for_completion=False)
+        return self._result_to_dict(
+            result, action="move_forward", target=f"{distance_meter}m", command_id=cid
+        )
 
     @with_retry()
     def move_by_velocity_muted(
@@ -231,18 +235,24 @@ class KachakaCommands:
                 move_duration_sec=duration_sec,
             )
         )
-        result = self._start_command_advanced(cmd, wait_for_completion=False)
+        result, cid = self._start_command_advanced(cmd, wait_for_completion=False)
         return self._result_to_dict(
             result,
             action="move_by_velocity_muted",
             target=f"v={signed_velocity}m/s, dur={duration_sec}s",
+            command_id=cid,
         )
 
     @with_retry()
     def rotate_in_place(self, angle_radian: float) -> dict:
         """Rotate in place by *angle_radian* (positive = counter-clockwise)."""
-        result = self.sdk.rotate_in_place(angle_radian, wait_for_completion=False)
-        return self._result_to_dict(result, action="rotate_in_place", target=f"{angle_radian}rad")
+        cmd = pb2.Command(
+            rotate_in_place_command=pb2.RotateInPlaceCommand(angle_radian=angle_radian)
+        )
+        result, cid = self._start_command_advanced(cmd, wait_for_completion=False)
+        return self._result_to_dict(
+            result, action="rotate_in_place", target=f"{angle_radian}rad", command_id=cid
+        )
 
     @with_retry()
     def return_home(
@@ -253,13 +263,15 @@ class KachakaCommands:
         title: str = "",
     ) -> dict:
         """Return to charger."""
-        result = self.sdk.return_home(
-            wait_for_completion=False,
+        cmd = pb2.Command(return_home_command=pb2.ReturnHomeCommand())
+        result, cid = self._start_command_advanced(
+            cmd,
             cancel_all=cancel_all,
             tts_on_success=tts_on_success,
             title=title,
+            wait_for_completion=False,
         )
-        return self._result_to_dict(result, action="return_home")
+        return self._result_to_dict(result, action="return_home", command_id=cid)
 
     # ── Shelf operations ─────────────────────────────────────────────
 
@@ -290,35 +302,27 @@ class KachakaCommands:
         shelf_id = self.conn.resolve_shelf(shelf_name)
         location_id = self.conn.resolve_location(location_name)
 
-        use_advanced = undock_on_destination or deferrable or lock_on_end_sec > 0
-        if use_advanced:
-            cmd = pb2.Command(
-                move_shelf_command=pb2.MoveShelfCommand(
-                    target_shelf_id=shelf_id,
-                    destination_location_id=location_id,
-                    undock_on_destination=undock_on_destination,
-                )
+        cmd = pb2.Command(
+            move_shelf_command=pb2.MoveShelfCommand(
+                target_shelf_id=shelf_id,
+                destination_location_id=location_id,
+                undock_on_destination=undock_on_destination,
             )
-            result = self._start_command_advanced(
-                cmd,
-                cancel_all=cancel_all,
-                tts_on_success=tts_on_success,
-                title=title,
-                deferrable=deferrable,
-                lock_on_end_sec=lock_on_end_sec,
-                wait_for_completion=False,
-            )
-        else:
-            result = self.sdk.move_shelf(
-                shelf_id,
-                location_id,
-                wait_for_completion=False,
-                cancel_all=cancel_all,
-                tts_on_success=tts_on_success,
-                title=title,
-            )
+        )
+        result, cid = self._start_command_advanced(
+            cmd,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+            deferrable=deferrable,
+            lock_on_end_sec=lock_on_end_sec,
+            wait_for_completion=False,
+        )
         return self._result_to_dict(
-            result, action="move_shelf", target=f"{shelf_name} -> {location_name}"
+            result,
+            action="move_shelf",
+            target=f"{shelf_name} -> {location_name}",
+            command_id=cid,
         )
 
     @with_retry()
@@ -326,14 +330,24 @@ class KachakaCommands:
         """Return the shelf to its home location."""
         self.conn.ensure_resolver()
         shelf_id = self.conn.resolve_shelf(shelf_name) if shelf_name else ""
-        result = self.sdk.return_shelf(shelf_id, wait_for_completion=False, **kwargs)
-        return self._result_to_dict(result, action="return_shelf", target=shelf_name or "(current)")
+        cmd = pb2.Command(
+            return_shelf_command=pb2.ReturnShelfCommand(target_shelf_id=shelf_id)
+        )
+        result, cid = self._start_command_advanced(
+            cmd, wait_for_completion=False, **kwargs
+        )
+        return self._result_to_dict(
+            result, action="return_shelf", target=shelf_name or "(current)", command_id=cid
+        )
 
     @with_retry()
     def dock_shelf(self, **kwargs) -> dict:
         """Dock the currently held shelf."""
-        result = self.sdk.dock_shelf(wait_for_completion=False, **kwargs)
-        return self._result_to_dict(result, action="dock_shelf")
+        cmd = pb2.Command(dock_shelf_command=pb2.DockShelfCommand())
+        result, cid = self._start_command_advanced(
+            cmd, wait_for_completion=False, **kwargs
+        )
+        return self._result_to_dict(result, action="dock_shelf", command_id=cid)
 
     @with_retry()
     def dock_any_shelf_with_registration(
@@ -348,25 +362,34 @@ class KachakaCommands:
         """Move to *location_name* and dock any shelf placed there. Registers unregistered shelves automatically."""
         self.conn.ensure_resolver()
         location_id = self.conn.resolve_location(location_name)
-        result = self.sdk.dock_any_shelf_with_registration(
-            location_id,
-            dock_forward,
-            wait_for_completion=False,
+        cmd = pb2.Command(
+            dock_any_shelf_with_registration_command=pb2.DockAnyShelfWithRegistrationCommand(
+                target_location_id=location_id,
+                dock_forward=dock_forward,
+            )
+        )
+        result, cid = self._start_command_advanced(
+            cmd,
             cancel_all=cancel_all,
             tts_on_success=tts_on_success,
             title=title,
+            wait_for_completion=False,
         )
         return self._result_to_dict(
             result,
             action="dock_any_shelf_with_registration",
             target=location_name,
+            command_id=cid,
         )
 
     @with_retry()
     def undock_shelf(self, **kwargs) -> dict:
         """Undock the currently held shelf."""
-        result = self.sdk.undock_shelf(wait_for_completion=False, **kwargs)
-        return self._result_to_dict(result, action="undock_shelf")
+        cmd = pb2.Command(undock_shelf_command=pb2.UndockShelfCommand())
+        result, cid = self._start_command_advanced(
+            cmd, wait_for_completion=False, **kwargs
+        )
+        return self._result_to_dict(result, action="undock_shelf", command_id=cid)
 
     @with_retry()
     def reset_shelf_pose(self, shelf_name: str) -> dict:
@@ -612,26 +635,71 @@ class KachakaCommands:
         self,
         timeout: float = 120.0,
         interval: float = 0.5,
+        *,
+        command_id: str = "",
     ) -> dict:
-        """Block until the current command finishes or *timeout* expires.
+        """Block until the tracked command finishes or *timeout* expires.
 
-        Returns the final command state.
+        Completion is verified against the ``command_id`` of the most
+        recently accepted command on this instance (or an explicit
+        ``command_id``).  The robot's idle state after a previous command
+        looks like ``PENDING`` + empty command_id — the same shape seen
+        during the registration window right after ``StartCommand`` — so
+        a poll that does not verify command_id can report completion in
+        ~0s while the command is still queuing (2026-07-07 field incident).
+
+        Without a tracked command_id (none issued through this instance),
+        falls back to the legacy ``is_command_running()`` heuristic, which
+        cannot distinguish the registration window from real completion.
         """
+        cid = command_id or self._last_command_id
+        if not cid:
+            logger.warning(
+                "poll_until_complete without a tracked command_id — completion "
+                "cannot be verified; issue the command through this instance "
+                "or pass command_id explicitly"
+            )
         start = time.time()
         while time.time() - start < timeout:
             try:
-                if not self.sdk.is_command_running():
-                    result, cmd = self.sdk.get_last_command_result()
-                    return {
-                        "ok": result.success,
-                        "error_code": result.error_code,
-                        "command": str(cmd) if cmd else None,
-                        "elapsed": round(time.time() - start, 1),
-                    }
+                if cid:
+                    state_resp = self.sdk.stub.GetCommandState(pb2.GetRequest())
+                    if (
+                        state_resp.command_id != cid
+                        or state_resp.state
+                        not in (pb2.COMMAND_STATE_RUNNING, pb2.COMMAND_STATE_PENDING)
+                    ):
+                        # Our command is not (or no longer) the active one —
+                        # complete only when the last result is actually ours.
+                        last = self.sdk.stub.GetLastCommandResult(pb2.GetRequest())
+                        if last.command_id == cid:
+                            d = {
+                                "ok": last.result.success,
+                                "error_code": last.result.error_code,
+                                "command_id": cid,
+                                "elapsed": round(time.time() - start, 1),
+                            }
+                            if not last.result.success:
+                                ec = last.result.error_code
+                                desc = self._resolve_error_description(ec)
+                                d["error"] = f"error_code={ec}" + (f": {desc}" if desc else "")
+                            return d
+                        # else: registration window (idle-looking PENDING +
+                        # empty command_id) or another command's result —
+                        # keep polling.
+                else:
+                    if not self.sdk.is_command_running():
+                        result, cmd = self.sdk.get_last_command_result()
+                        return {
+                            "ok": result.success,
+                            "error_code": result.error_code,
+                            "command": str(cmd) if cmd else None,
+                            "elapsed": round(time.time() - start, 1),
+                        }
             except Exception as exc:
                 logger.debug("poll error: %s", exc)
             time.sleep(interval)
-        return {"ok": False, "error": "timeout", "timeout": timeout}
+        return {"ok": False, "error": "timeout", "timeout": timeout, "command_id": cid or None}
 
     # ── Torch / lighting ────────────────────────────────────────────
 
@@ -716,7 +784,9 @@ class KachakaCommands:
             return defs[error_code].get("title", "")
         return ""
 
-    def _result_to_dict(self, result, *, action: str = "", target: str = "") -> dict:
+    def _result_to_dict(
+        self, result, *, action: str = "", target: str = "", command_id: str = ""
+    ) -> dict:
         """Convert a ``pb2.Result`` into a standardised response dict.
 
         On failure, also queries ``get_error()`` to surface the *active* state
@@ -725,6 +795,8 @@ class KachakaCommands:
         state needs a physical power button, LiDAR fault needs ``restart_robot``).
         """
         d: dict = {"ok": result.success}
+        if command_id:
+            d["command_id"] = command_id
         if not result.success:
             ec = result.error_code
             d["error_code"] = ec

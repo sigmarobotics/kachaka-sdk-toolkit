@@ -14,8 +14,14 @@ import json
 import logging
 import time
 
-from mcp.server.fastmcp import FastMCP, Image
-from mcp.types import TextContent
+try:
+    from mcp.server.fastmcp import FastMCP, Image
+    from mcp.types import TextContent
+except ImportError as _exc:  # pragma: no cover
+    raise SystemExit(
+        "MCP server dependencies are not installed — "
+        "install with: pip install 'kachaka-sdk-toolkit[mcp]'"
+    ) from _exc
 
 from kachaka_core.commands import KachakaCommands
 from kachaka_core.playground import PlaygroundSSH
@@ -158,7 +164,9 @@ def move_to_location(
     """Move robot to a registered location by name or ID.
 
     Use ``list_locations`` first to see available destinations.
-    This is a blocking call — returns when movement completes.
+    Fire-and-accept: returns as soon as the robot ACCEPTS the command —
+    the robot is still moving when this returns. For a blocking move that
+    returns on arrival, use ``start_controller`` + ``controller_move_to_location``.
 
     source_location_name: optional path-planning hint (kachaka-api 3.16.1+).
     Forces the planner to treat this location as the route's starting point
@@ -173,7 +181,10 @@ def move_to_location(
 
 @mcp.tool()
 def move_to_pose(ip: str, x: float, y: float, yaw: float) -> dict:
-    """Move robot to absolute map coordinates (x, y, yaw in radians)."""
+    """Move robot to absolute map coordinates (x, y, yaw in radians).
+
+    Fire-and-accept: returns on command accept, not arrival.
+    """
     return KachakaCommands(KachakaConnection.get(ip)).move_to_pose(x, y, yaw)
 
 
@@ -184,6 +195,8 @@ def move_forward(
     mute_sensors: bool = False,
 ) -> dict:
     """Move forward (positive) or backward (negative) by a distance in meters.
+
+    Fire-and-accept: returns on command accept, not when the move finishes.
 
     mute_sensors: when True (kachaka-api 3.16.1+), bypass safety sensors for
     this move. Use only for rescuing the robot from a tight spot — collision
@@ -215,13 +228,20 @@ def move_by_velocity_muted(
 
 @mcp.tool()
 def rotate(ip: str, angle_radian: float) -> dict:
-    """Rotate in place. Positive = counter-clockwise."""
+    """Rotate in place. Positive = counter-clockwise.
+
+    Fire-and-accept: returns on command accept, not when rotation finishes.
+    For a blocking rotate, use ``start_controller`` + ``controller_rotate``.
+    """
     return KachakaCommands(KachakaConnection.get(ip)).rotate_in_place(angle_radian)
 
 
 @mcp.tool()
 def return_home(ip: str) -> dict:
-    """Send robot back to its charger."""
+    """Send robot back to its charger.
+
+    Fire-and-accept: returns on command accept, not on docking.
+    """
     return KachakaCommands(KachakaConnection.get(ip)).return_home()
 
 
@@ -236,6 +256,9 @@ def move_shelf(
 ) -> dict:
     """Pick up a shelf and deliver it to a location (by name or ID).
 
+    Fire-and-accept: returns on command accept, not delivery. For a
+    blocking move with drop monitoring, use ``controller_move_shelf``.
+
     undock_on_destination: if True, automatically undock the shelf at the
     destination instead of staying docked.
     """
@@ -246,19 +269,28 @@ def move_shelf(
 
 @mcp.tool()
 def return_shelf(ip: str, shelf_name: str = "") -> dict:
-    """Return the currently held (or named) shelf to its home location."""
+    """Return the currently held (or named) shelf to its home location.
+
+    Fire-and-accept: returns on command accept, not completion.
+    """
     return KachakaCommands(KachakaConnection.get(ip)).return_shelf(shelf_name)
 
 
 @mcp.tool()
 def dock_shelf(ip: str) -> dict:
-    """Dock the currently held shelf onto the robot."""
+    """Dock the currently held shelf onto the robot.
+
+    Fire-and-accept: returns on command accept, not completion.
+    """
     return KachakaCommands(KachakaConnection.get(ip)).dock_shelf()
 
 
 @mcp.tool()
 def undock_shelf(ip: str) -> dict:
-    """Undock the currently held shelf from the robot."""
+    """Undock the currently held shelf from the robot.
+
+    Fire-and-accept: returns on command accept, not completion.
+    """
     return KachakaCommands(KachakaConnection.get(ip)).undock_shelf()
 
 
@@ -267,6 +299,9 @@ def dock_any_shelf_with_registration(
     ip: str, location_name: str, dock_forward: bool = False
 ) -> dict:
     """Move to a location and dock any shelf placed there. If the shelf is unregistered, it is automatically registered as new.
+
+    Fire-and-accept: returns on command accept, not completion. For a
+    blocking version, use ``controller_dock_any_shelf``.
 
     dock_forward: if True the robot approaches the shelf head-first (default False = tail-first).
     """
@@ -399,6 +434,21 @@ def controller_move_to_location(ip: str, location_name: str) -> dict:
 
 
 @mcp.tool()
+def controller_rotate(ip: str, angle_radian: float) -> dict:
+    """Rotate in place via the background controller — blocks until done.
+
+    Positive = counter-clockwise. Uses command_id verification, so it is
+    safe against the registration-window race that makes fire-and-accept
+    polling misjudge completion. Requires ``start_controller`` first.
+    """
+    key = _controller_key(ip)
+    ctrl = _controllers.get(key)
+    if ctrl is None:
+        return {"ok": False, "error": "controller not started"}
+    return ctrl.rotate_in_place(angle_radian)
+
+
+@mcp.tool()
 def controller_dock_any_shelf(
     ip: str, location_name: str, dock_forward: bool = False,
 ) -> dict:
@@ -458,24 +508,31 @@ def get_last_result(ip: str) -> dict:
 
 
 @mcp.tool()
-def capture_front_camera(ip: str):
+def capture_front_camera(ip: str, fresh: bool = True):
     """Capture a JPEG from the front camera.
 
+    fresh=True (default) waits for a frame captured AFTER this call — the
+    camera buffer may still hold a frame from before the robot's last move,
+    which looks normal but shows the wrong place. fresh=False returns the
+    buffered frame immediately.
     Returns the image directly — Claude can see it inline.
     """
-    result = KachakaQueries(KachakaConnection.get(ip)).get_front_camera_image()
+    result = KachakaQueries(KachakaConnection.get(ip)).get_front_camera_image(fresh=fresh)
     if not result["ok"]:
         return result
     return Image(data=base64.b64decode(result["image_base64"]), format="jpeg")
 
 
 @mcp.tool()
-def capture_back_camera(ip: str):
+def capture_back_camera(ip: str, fresh: bool = True):
     """Capture a JPEG from the back camera.
 
+    fresh=True (default) waits for a frame captured AFTER this call (see
+    ``capture_front_camera``). fresh=False returns the buffered frame
+    immediately.
     Returns the image directly — Claude can see it inline.
     """
-    result = KachakaQueries(KachakaConnection.get(ip)).get_back_camera_image()
+    result = KachakaQueries(KachakaConnection.get(ip)).get_back_camera_image(fresh=fresh)
     if not result["ok"]:
         return result
     return Image(data=base64.b64decode(result["image_base64"]), format="jpeg")

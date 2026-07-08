@@ -130,28 +130,93 @@ class TestShelves:
         assert result["shelf_id"] == "shelf-1"
 
 
+def _img(data: bytes, stamp_nsec: int, fmt: str = "jpeg"):
+    """Build a mock RosCompressedImage with a header stamp."""
+    img = MagicMock()
+    img.data = data
+    img.format = fmt
+    img.header.stamp_nsec = stamp_nsec
+    return img
+
+
 class TestCamera:
-    def test_front_camera(self):
+    """Single-shot capture with freshness verification (2026-07-07 field
+    incident: buffered frame from before the move returned as 'current')."""
+
+    def test_front_camera_fresh_waits_for_newer_stamp(self):
         mock = MagicMock()
-        mock.get_front_camera_ros_compressed_image.return_value = MagicMock(
-            data=b"\xff\xd8test-jpeg", format="jpeg"
-        )
+        mock.get_front_camera_ros_compressed_image.side_effect = [
+            _img(b"\xff\xd8stale", 1000),   # buffered baseline
+            _img(b"\xff\xd8stale", 1000),   # same stale frame again
+            _img(b"\xff\xd8new", 2000),     # fresh frame arrives
+        ]
         conn = _make_conn(mock)
 
-        result = KachakaQueries(conn).get_front_camera_image()
+        with patch("kachaka_core.queries.time.sleep"):
+            result = KachakaQueries(conn).get_front_camera_image()
 
         assert result["ok"] is True
         assert result["format"] == "jpeg"
-        assert len(result["image_base64"]) > 0
+        assert result["fresh"] is True
+        import base64
+        assert base64.b64decode(result["image_base64"]) == b"\xff\xd8new"
 
-    def test_back_camera(self):
+    def test_front_camera_fresh_timeout_on_frozen_buffer(self):
         mock = MagicMock()
-        mock.get_back_camera_ros_compressed_image.return_value = MagicMock(
-            data=b"\xff\xd8back", format="jpeg"
+        mock.get_front_camera_ros_compressed_image.return_value = _img(
+            b"\xff\xd8frozen", 1000
         )
         conn = _make_conn(mock)
 
-        result = KachakaQueries(conn).get_back_camera_image()
+        with patch("kachaka_core.queries.time.sleep"):
+            with patch(
+                "kachaka_core.queries.time.time", side_effect=[0, 0, 0.5, 999, 999]
+            ):
+                result = KachakaQueries(conn).get_front_camera_image(timeout=1.0)
+
+        assert result["ok"] is False
+        assert "fresh" in result["error"]
+
+    def test_front_camera_fresh_false_returns_buffer(self):
+        mock = MagicMock()
+        mock.get_front_camera_ros_compressed_image.return_value = _img(
+            b"\xff\xd8test-jpeg", 1000
+        )
+        conn = _make_conn(mock)
+
+        result = KachakaQueries(conn).get_front_camera_image(fresh=False)
+
+        assert result["ok"] is True
+        assert result["fresh"] is False
+        mock.get_front_camera_ros_compressed_image.assert_called_once()
+
+    def test_fresh_zero_stamp_falls_back_to_data_change(self):
+        """Firmware leaving stamp_nsec=0 — freshness via changed frame bytes."""
+        mock = MagicMock()
+        mock.get_front_camera_ros_compressed_image.side_effect = [
+            _img(b"\xff\xd8frameA", 0),
+            _img(b"\xff\xd8frameA", 0),
+            _img(b"\xff\xd8frameB", 0),
+        ]
+        conn = _make_conn(mock)
+
+        with patch("kachaka_core.queries.time.sleep"):
+            result = KachakaQueries(conn).get_front_camera_image()
+
+        assert result["ok"] is True
+        import base64
+        assert base64.b64decode(result["image_base64"]) == b"\xff\xd8frameB"
+
+    def test_back_camera(self):
+        mock = MagicMock()
+        mock.get_back_camera_ros_compressed_image.side_effect = [
+            _img(b"\xff\xd8back", 1000),
+            _img(b"\xff\xd8back2", 2000),
+        ]
+        conn = _make_conn(mock)
+
+        with patch("kachaka_core.queries.time.sleep"):
+            result = KachakaQueries(conn).get_back_camera_image()
         assert result["ok"] is True
 
 

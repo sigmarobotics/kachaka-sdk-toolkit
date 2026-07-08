@@ -33,11 +33,24 @@ def _make_conn(mock_client):
     return conn
 
 
+def _wire_start_command(mock_client, *, command_id: str = "cmd-1", success: bool = True,
+                        error_code: int = 0) -> MagicMock:
+    """Wire the stub so StartCommand-based dispatch succeeds (fire-and-accept)."""
+    mock_stub = MagicMock()
+    start_resp = MagicMock()
+    start_resp.result.success = success
+    start_resp.result.error_code = error_code
+    start_resp.command_id = command_id
+    mock_stub.StartCommand.return_value = start_resp
+    mock_client.stub = mock_stub
+    return mock_stub
+
+
 class TestMovement:
     def test_move_to_location_success(self):
         mock_client = MagicMock()
-        mock_client.move_to_location.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         cmds = KachakaCommands(conn)
         result = cmds.move_to_location("Kitchen")
@@ -45,11 +58,14 @@ class TestMovement:
         assert result["ok"] is True
         assert result["action"] == "move_to_location"
         assert result["target"] == "Kitchen"
+        assert result["command_id"] == "cmd-1"
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.move_to_location_command.target_location_id == "Kitchen"
 
     def test_move_to_location_failure(self):
         mock_client = MagicMock()
-        mock_client.move_to_location.return_value = _make_result(False, error_code=101)
         conn = _make_conn(mock_client)
+        _wire_start_command(mock_client, success=False, error_code=101)
 
         cmds = KachakaCommands(conn)
         result = cmds.move_to_location("Nowhere")
@@ -59,72 +75,92 @@ class TestMovement:
 
     def test_move_to_pose(self):
         mock_client = MagicMock()
-        mock_client.move_to_pose.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         cmds = KachakaCommands(conn)
         result = cmds.move_to_pose(1.0, 2.0, 0.5)
 
         assert result["ok"] is True
-        mock_client.move_to_pose.assert_called_once_with(
-            1.0, 2.0, 0.5,
-            wait_for_completion=False, cancel_all=True, tts_on_success="", title="",
-        )
+        assert result["command_id"] == "cmd-1"
+        req = mock_stub.StartCommand.call_args[0][0]
+        pose_cmd = req.command.move_to_pose_command
+        assert pose_cmd.x == pytest.approx(1.0)
+        assert pose_cmd.y == pytest.approx(2.0)
+        assert pose_cmd.yaw == pytest.approx(0.5)
+
+    def test_rotate_in_place(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
+
+        result = KachakaCommands(conn).rotate_in_place(1.57)
+        assert result["ok"] is True
+        assert result["command_id"] == "cmd-1"
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.rotate_in_place_command.angle_radian == pytest.approx(1.57)
 
     def test_return_home(self):
         mock_client = MagicMock()
-        mock_client.return_home.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         cmds = KachakaCommands(conn)
         result = cmds.return_home()
 
         assert result["ok"] is True
         assert result["action"] == "return_home"
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.HasField("return_home_command")
 
 
 class TestShelfOps:
     def test_move_shelf(self):
         mock_client = MagicMock()
-        mock_client.move_shelf.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         cmds = KachakaCommands(conn)
         result = cmds.move_shelf("Shelf A", "Room 1")
 
         assert result["ok"] is True
         assert "Shelf A" in result["target"]
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.move_shelf_command.target_shelf_id == "Shelf A"
+        assert req.command.move_shelf_command.destination_location_id == "Room 1"
 
     def test_dock_shelf(self):
         mock_client = MagicMock()
-        mock_client.dock_shelf.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         result = KachakaCommands(conn).dock_shelf()
         assert result["ok"] is True
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.HasField("dock_shelf_command")
 
     def test_dock_any_shelf_with_registration(self):
         mock_client = MagicMock()
-        mock_client.dock_any_shelf_with_registration.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         result = KachakaCommands(conn).dock_any_shelf_with_registration("L01")
         assert result["ok"] is True
         assert result["action"] == "dock_any_shelf_with_registration"
         assert result["target"] == "L01"
-        mock_client.dock_any_shelf_with_registration.assert_called_once()
+        mock_stub.StartCommand.assert_called_once()
 
     def test_dock_any_shelf_with_registration_forward(self):
         mock_client = MagicMock()
-        mock_client.dock_any_shelf_with_registration.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         result = KachakaCommands(conn).dock_any_shelf_with_registration(
             "L01", dock_forward=True
         )
         assert result["ok"] is True
-        args, kwargs = mock_client.dock_any_shelf_with_registration.call_args
-        assert args[1] is True  # dock_forward
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.dock_any_shelf_with_registration_command.dock_forward is True
 
     def test_reset_shelf_pose(self):
         mock_client = MagicMock()
@@ -521,14 +557,15 @@ class TestMoveShelfAdvanced:
         req = mock_stub.StartCommand.call_args[0][0]
         assert req.command.move_shelf_command.undock_on_destination is True
 
-    def test_move_shelf_default_uses_sdk(self):
+    def test_move_shelf_default_no_undock(self):
         mock_client = MagicMock()
-        mock_client.move_shelf.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         result = KachakaCommands(conn).move_shelf("Shelf A", "Room 1")
         assert result["ok"] is True
-        mock_client.move_shelf.assert_called_once()
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.move_shelf_command.undock_on_destination is False
 
 
 class TestCancelCommand:
@@ -551,8 +588,153 @@ class TestStop:
         mock_client.set_robot_stop.assert_called_once()
 
 
+def _state_resp(state, command_id=""):
+    resp = MagicMock()
+    resp.state = state
+    resp.command_id = command_id
+    return resp
+
+
+def _last_resp(command_id, success=True, error_code=0):
+    resp = MagicMock()
+    resp.command_id = command_id
+    resp.result.success = success
+    resp.result.error_code = error_code
+    return resp
+
+
 class TestPollUntilComplete:
-    def test_immediate_completion(self):
+    """command_id-verified completion (2026-07-07 field incident regression).
+
+    The robot's idle state is PENDING + empty command_id — identical to the
+    registration window right after StartCommand. Completion must never be
+    reported until GetLastCommandResult carries OUR command_id.
+    """
+
+    # COMMAND_STATE enum values (from kachaka_api proto)
+    from kachaka_api.generated import kachaka_api_pb2 as pb2
+    RUNNING = pb2.COMMAND_STATE_RUNNING
+    PENDING = pb2.COMMAND_STATE_PENDING
+
+    def _cmds_with_tracked_id(self, mock_client, command_id="cmd-42"):
+        conn = _make_conn(mock_client)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_client.stub = MagicMock()
+        cmds = KachakaCommands(conn)
+        cmds._last_command_id = command_id
+        return cmds
+
+    def test_registration_window_is_not_completion(self):
+        """Idle-looking PENDING + empty id + stale last result must keep polling."""
+        mock_client = MagicMock()
+        cmds = self._cmds_with_tracked_id(mock_client)
+        # Sequence: registration window (idle shape, last result = OLD command),
+        # then our command runs, then completes.
+        mock_client.stub.GetCommandState.side_effect = [
+            _state_resp(self.PENDING, ""),          # registration window
+            _state_resp(self.RUNNING, "cmd-42"),    # our command registered
+            _state_resp(self.PENDING, ""),          # back to idle = finished
+        ]
+        mock_client.stub.GetLastCommandResult.side_effect = [
+            _last_resp("cmd-OLD"),                   # stale result — must be ignored
+            _last_resp("cmd-42", success=True),      # our result
+        ]
+
+        with patch("kachaka_core.commands.time.sleep"):
+            result = cmds.poll_until_complete(timeout=10.0)
+
+        assert result["ok"] is True
+        assert result["command_id"] == "cmd-42"
+        # The stale result was fetched once (during the window) and rejected
+        assert mock_client.stub.GetLastCommandResult.call_count == 2
+
+    def test_fast_command_already_completed(self):
+        """Command finished before the first poll — last result already ours."""
+        mock_client = MagicMock()
+        cmds = self._cmds_with_tracked_id(mock_client)
+        mock_client.stub.GetCommandState.return_value = _state_resp(self.PENDING, "")
+        mock_client.stub.GetLastCommandResult.return_value = _last_resp("cmd-42")
+
+        result = cmds.poll_until_complete(timeout=5.0)
+        assert result["ok"] is True
+        assert result["command_id"] == "cmd-42"
+
+    def test_command_failure_reported(self):
+        mock_client = MagicMock()
+        cmds = self._cmds_with_tracked_id(mock_client)
+        mock_client.stub.GetCommandState.return_value = _state_resp(self.PENDING, "")
+        mock_client.stub.GetLastCommandResult.return_value = _last_resp(
+            "cmd-42", success=False, error_code=12345
+        )
+
+        result = cmds.poll_until_complete(timeout=5.0)
+        assert result["ok"] is False
+        assert result["error_code"] == 12345
+        assert "12345" in result["error"]
+
+    def test_explicit_command_id_overrides_tracked(self):
+        mock_client = MagicMock()
+        cmds = self._cmds_with_tracked_id(mock_client, command_id="cmd-STALE")
+        mock_client.stub.GetCommandState.return_value = _state_resp(self.PENDING, "")
+        mock_client.stub.GetLastCommandResult.return_value = _last_resp("cmd-99")
+
+        result = cmds.poll_until_complete(timeout=5.0, command_id="cmd-99")
+        assert result["ok"] is True
+        assert result["command_id"] == "cmd-99"
+
+    def test_timeout_when_result_never_ours(self):
+        """Our command's result never appears — timeout, never false-complete."""
+        mock_client = MagicMock()
+        cmds = self._cmds_with_tracked_id(mock_client)
+        mock_client.stub.GetCommandState.return_value = _state_resp(self.PENDING, "")
+        mock_client.stub.GetLastCommandResult.return_value = _last_resp("cmd-OTHER")
+
+        with patch("kachaka_core.commands.time.sleep"):
+            with patch(
+                "kachaka_core.commands.time.time", side_effect=[0, 0, 0.5, 999]
+            ):
+                result = cmds.poll_until_complete(timeout=1.0)
+
+        assert result["ok"] is False
+        assert result["error"] == "timeout"
+        assert result["command_id"] == "cmd-42"
+
+    def test_running_command_keeps_polling(self):
+        mock_client = MagicMock()
+        cmds = self._cmds_with_tracked_id(mock_client)
+        mock_client.stub.GetCommandState.side_effect = [
+            _state_resp(self.RUNNING, "cmd-42"),
+            _state_resp(self.RUNNING, "cmd-42"),
+            _state_resp(self.PENDING, ""),
+        ]
+        mock_client.stub.GetLastCommandResult.return_value = _last_resp("cmd-42")
+
+        with patch("kachaka_core.commands.time.sleep"):
+            result = cmds.poll_until_complete(timeout=10.0)
+
+        assert result["ok"] is True
+        # While RUNNING with our id, GetLastCommandResult must not be consulted
+        assert mock_client.stub.GetLastCommandResult.call_count == 1
+
+    def test_dispatch_then_poll_uses_tracked_id(self):
+        """End-to-end: move_to_location records command_id; poll verifies it."""
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client, command_id="cmd-move")
+        cmds = KachakaCommands(conn)
+
+        dispatch = cmds.move_to_location("Kitchen")
+        assert dispatch["command_id"] == "cmd-move"
+
+        mock_stub.GetCommandState.return_value = _state_resp(self.PENDING, "")
+        mock_stub.GetLastCommandResult.return_value = _last_resp("cmd-move")
+        result = cmds.poll_until_complete(timeout=5.0)
+        assert result["ok"] is True
+        assert result["command_id"] == "cmd-move"
+
+    # ── Legacy fallback (no tracked command_id) ─────────────────────
+
+    def test_legacy_immediate_completion(self):
         mock_client = MagicMock()
         mock_client.is_command_running.return_value = False
         mock_client.get_last_command_result.return_value = (
@@ -564,7 +746,7 @@ class TestPollUntilComplete:
         result = KachakaCommands(conn).poll_until_complete(timeout=5.0)
         assert result["ok"] is True
 
-    def test_timeout(self):
+    def test_legacy_timeout(self):
         mock_client = MagicMock()
         mock_client.is_command_running.return_value = True
         conn = _make_conn(mock_client)
@@ -597,16 +779,17 @@ def _wire_advanced_stub(mock_client) -> MagicMock:
 
 
 class TestMoveForwardMuteSensors:
-    def test_default_uses_sdk(self):
+    def test_default_sensors_active(self):
         mock_client = MagicMock()
-        mock_client.move_forward.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         result = KachakaCommands(conn).move_forward(0.5)
         assert result["ok"] is True
-        mock_client.move_forward.assert_called_once_with(
-            0.5, speed=0.1, wait_for_completion=False,
-        )
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.move_forward_command.mute_sensors is False
+        assert req.command.move_forward_command.distance_meter == 0.5
+        assert req.command.move_forward_command.speed == pytest.approx(0.1)
 
     def test_mute_sensors_uses_start_command(self):
         mock_client = MagicMock()
@@ -623,14 +806,15 @@ class TestMoveForwardMuteSensors:
 
 
 class TestMoveToLocationSource:
-    def test_default_uses_sdk(self):
+    def test_default_no_source(self):
         mock_client = MagicMock()
-        mock_client.move_to_location.return_value = _make_result(True)
         conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
 
         result = KachakaCommands(conn).move_to_location("Kitchen")
         assert result["ok"] is True
-        mock_client.move_to_location.assert_called_once()
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.move_to_location_command.source_location_id == ""
 
     def test_source_uses_start_command(self):
         mock_client = MagicMock()
@@ -695,92 +879,56 @@ class TestSwitchMapInvalidation:
 
 
 class TestFireAndAccept:
-    """Command wrappers must pass wait_for_completion=False to the SDK.
+    """StartCommand-based wrappers must return on acceptance.
 
     The SDK's blocking flow waits in an unbounded GetLastCommandResult
     long-poll (2026-05-18 production hang). The toolkit owns completion via
-    poll_until_complete / RobotController, so every StartCommand-based
-    wrapper must return on acceptance.
+    poll_until_complete / RobotController, so every wrapper dispatches
+    StartCommand directly, never enters the completion long-poll, and
+    records the accepted command_id for verified polling (2026-07-07).
     """
 
-    def _kwargs(self, mock_method):
-        assert mock_method.call_count == 1
-        return mock_method.call_args.kwargs
+    DISPATCHES = [
+        ("move_to_location", ("Kitchen",), {}),
+        ("move_to_pose", (1.0, 2.0, 0.5), {}),
+        ("move_forward", (0.5,), {}),
+        ("rotate_in_place", (1.57,), {}),
+        ("return_home", (), {}),
+        ("move_shelf", ("Shelf A", "Room 1"), {}),
+        ("return_shelf", ("Shelf A",), {}),
+        ("dock_shelf", (), {}),
+        ("undock_shelf", (), {}),
+        ("dock_any_shelf_with_registration", ("Room 1",), {}),
+    ]
 
-    def test_move_to_location_fire_and_accept(self):
+    @pytest.mark.parametrize("method,args,kwargs", DISPATCHES)
+    def test_fire_and_accept_with_command_id(self, method, args, kwargs):
         mock_client = MagicMock()
-        mock_client.move_to_location.return_value = _make_result(True)
         conn = _make_conn(mock_client)
-        KachakaCommands(conn).move_to_location("Kitchen")
-        assert self._kwargs(mock_client.move_to_location)["wait_for_completion"] is False
+        mock_stub = _wire_start_command(mock_client, command_id="cmd-fa")
 
-    def test_move_to_pose_fire_and_accept(self):
-        mock_client = MagicMock()
-        mock_client.move_to_pose.return_value = _make_result(True)
-        conn = _make_conn(mock_client)
-        KachakaCommands(conn).move_to_pose(1.0, 2.0, 0.5)
-        assert self._kwargs(mock_client.move_to_pose)["wait_for_completion"] is False
+        cmds = KachakaCommands(conn)
+        result = getattr(cmds, method)(*args, **kwargs)
 
-    def test_move_forward_fire_and_accept(self):
-        mock_client = MagicMock()
-        mock_client.move_forward.return_value = _make_result(True)
-        conn = _make_conn(mock_client)
-        KachakaCommands(conn).move_forward(0.5)
-        assert self._kwargs(mock_client.move_forward)["wait_for_completion"] is False
+        assert result["ok"] is True
+        assert result["command_id"] == "cmd-fa"
+        mock_stub.StartCommand.assert_called_once()
+        # Fire-and-accept: never enters the completion long-poll
+        mock_stub.GetLastCommandResult.assert_not_called()
+        # Accepted command_id is tracked for poll_until_complete
+        assert cmds._last_command_id == "cmd-fa"
 
-    def test_rotate_in_place_fire_and_accept(self):
+    @pytest.mark.parametrize("method,args,kwargs", DISPATCHES[:3])
+    def test_rejected_command_does_not_track_id(self, method, args, kwargs):
         mock_client = MagicMock()
-        mock_client.rotate_in_place.return_value = _make_result(True)
         conn = _make_conn(mock_client)
-        KachakaCommands(conn).rotate_in_place(1.57)
-        assert self._kwargs(mock_client.rotate_in_place)["wait_for_completion"] is False
+        _wire_start_command(mock_client, success=False, error_code=15508)
 
-    def test_return_home_fire_and_accept(self):
-        mock_client = MagicMock()
-        mock_client.return_home.return_value = _make_result(True)
-        conn = _make_conn(mock_client)
-        KachakaCommands(conn).return_home()
-        assert self._kwargs(mock_client.return_home)["wait_for_completion"] is False
+        cmds = KachakaCommands(conn)
+        result = getattr(cmds, method)(*args, **kwargs)
 
-    def test_move_shelf_fire_and_accept(self):
-        mock_client = MagicMock()
-        mock_client.move_shelf.return_value = _make_result(True)
-        conn = _make_conn(mock_client)
-        KachakaCommands(conn).move_shelf("Shelf A", "Room 1")
-        assert self._kwargs(mock_client.move_shelf)["wait_for_completion"] is False
-
-    def test_return_shelf_fire_and_accept(self):
-        mock_client = MagicMock()
-        mock_client.return_shelf.return_value = _make_result(True)
-        conn = _make_conn(mock_client)
-        KachakaCommands(conn).return_shelf("Shelf A")
-        assert self._kwargs(mock_client.return_shelf)["wait_for_completion"] is False
-
-    def test_dock_shelf_fire_and_accept(self):
-        mock_client = MagicMock()
-        mock_client.dock_shelf.return_value = _make_result(True)
-        conn = _make_conn(mock_client)
-        KachakaCommands(conn).dock_shelf()
-        assert self._kwargs(mock_client.dock_shelf)["wait_for_completion"] is False
-
-    def test_undock_shelf_fire_and_accept(self):
-        mock_client = MagicMock()
-        mock_client.undock_shelf.return_value = _make_result(True)
-        conn = _make_conn(mock_client)
-        KachakaCommands(conn).undock_shelf()
-        assert self._kwargs(mock_client.undock_shelf)["wait_for_completion"] is False
-
-    def test_dock_any_shelf_with_registration_fire_and_accept(self):
-        mock_client = MagicMock()
-        mock_client.dock_any_shelf_with_registration.return_value = _make_result(True)
-        conn = _make_conn(mock_client)
-        KachakaCommands(conn).dock_any_shelf_with_registration("Room 1")
-        assert (
-            self._kwargs(mock_client.dock_any_shelf_with_registration)[
-                "wait_for_completion"
-            ]
-            is False
-        )
+        assert result["ok"] is False
+        assert cmds._last_command_id == ""
 
     def test_advanced_path_skips_completion_long_poll(self):
         """_start_command_advanced callers must not enter the cursor wait loop."""
