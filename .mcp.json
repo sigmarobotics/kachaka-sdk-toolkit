@@ -2,7 +2,7 @@
   "kachaka": {
     "command": "uvx",
     "args": [
-      "--from", "kachaka-sdk-toolkit",
+      "--from", "kachaka-sdk-toolkit[mcp]",
       "kachaka-mcp"
     ]
   }
