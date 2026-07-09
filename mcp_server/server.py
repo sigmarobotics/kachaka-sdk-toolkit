@@ -484,6 +484,44 @@ def get_volume(ip: str) -> dict:
     return KachakaQueries(KachakaConnection.get(ip)).get_speaker_volume()
 
 
+# ── Custom sounds ─────────────────────────────────────────────────────
+# Custom audio playback beyond TTS (Sound API, kachaka-api 3.17+).
+
+@mcp.tool()
+def list_sounds(ip: str) -> dict:
+    """List custom sound clips registered on the robot (id + name)."""
+    return KachakaQueries(KachakaConnection.get(ip)).list_sounds()
+
+
+@mcp.tool()
+def add_sound(ip: str, name: str, path: str = "", data_base64: str = "") -> dict:
+    """Upload a custom sound clip (WAV) to the robot; returns its sound_id.
+
+    Provide the audio as a local file *path* the server can read, or as
+    base64-encoded *data_base64*. Play it later with play_sound.
+    """
+    data = base64.b64decode(data_base64) if data_base64 else b""
+    return KachakaCommands(KachakaConnection.get(ip)).add_sound(name, path=path, data=data)
+
+
+@mcp.tool()
+def play_sound(ip: str, sound_id: str, loop: bool = False) -> dict:
+    """Play a previously uploaded custom sound by its ID (loop to repeat)."""
+    return KachakaCommands(KachakaConnection.get(ip)).play_sound(sound_id, loop=loop)
+
+
+@mcp.tool()
+def stop_sound(ip: str) -> dict:
+    """Stop the custom sound currently playing."""
+    return KachakaCommands(KachakaConnection.get(ip)).stop_sound()
+
+
+@mcp.tool()
+def delete_sound(ip: str, sound_id: str) -> dict:
+    """Delete a custom sound clip from the robot by its ID."""
+    return KachakaCommands(KachakaConnection.get(ip)).delete_sound(sound_id)
+
+
 # ── Command control ──────────────────────────────────────────────────
 
 @mcp.tool()

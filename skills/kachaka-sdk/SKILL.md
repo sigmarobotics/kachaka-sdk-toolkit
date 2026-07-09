@@ -244,6 +244,27 @@ cmds.speak("Patrol complete")
 cmds.set_speaker_volume(5)    # 0–10
 ```
 
+## Custom sounds (kachaka-api 3.17+)
+
+Custom audio playback beyond TTS — upload a WAV clip once, then play it on
+demand. Requires robot firmware / `kachaka-api` **≥ 3.17** (the Sound API is
+not wrapped by the official Python SDK; `kachaka_core` dispatches it directly).
+
+```python
+add = cmds.add_sound("doorbell", path="doorbell.wav")  # or data=<wav bytes>
+sound_id = add["sound_id"]
+
+cmds.play_sound(sound_id)              # play once
+cmds.play_sound(sound_id, loop=True)   # repeat until stopped
+cmds.stop_sound()
+
+queries.list_sounds()   # {"ok": True, "sounds": [{"id", "name"}, ...]}
+cmds.delete_sound(sound_id)
+```
+
+> `list_sounds()` returns an eventually-consistent snapshot — a clip added or
+> deleted a moment ago may take a second or two to appear/disappear.
+
 ## Status Queries
 
 ```python

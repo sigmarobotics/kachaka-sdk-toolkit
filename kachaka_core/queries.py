@@ -502,3 +502,19 @@ class KachakaQueries:
                 "theta": theta,
             })
         return {"ok": True, "transforms": transforms}
+
+    # ── Custom sounds ────────────────────────────────────────────────
+
+    @with_retry()
+    def list_sounds(self) -> dict:
+        """All custom sound clips registered on the robot (id + name).
+
+        Backs the Sound API added in kachaka-api 3.17 — custom audio
+        playback beyond TTS. This gRPC RPC is not wrapped by the official
+        Python SDK.
+        """
+        response = self.sdk.stub.GetSoundList(pb2.GetRequest())
+        return {
+            "ok": True,
+            "sounds": [{"id": s.id, "name": s.name} for s in response.sounds],
+        }

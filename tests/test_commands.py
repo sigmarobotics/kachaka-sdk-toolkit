@@ -473,6 +473,110 @@ class TestLaserScan:
         assert call_args[0][0].duration_sec == 5.0
 
 
+class TestSounds:
+    @staticmethod
+    def _wire(mock_client, rpc: str, *, success: bool = True, error_code: int = 0,
+              sound_id: str = ""):
+        """Wire a stub RPC to return a Result-bearing response (post _make_conn)."""
+        mock_stub = MagicMock()
+        resp = MagicMock()
+        resp.result = _make_result(success, error_code)
+        if sound_id:
+            resp.sound_id = sound_id
+        getattr(mock_stub, rpc).return_value = resp
+        mock_client.stub = mock_stub
+        return mock_stub
+
+    def test_add_sound_from_bytes(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = self._wire(mock_client, "AddSound", sound_id="snd-42")
+
+        result = KachakaCommands(conn).add_sound("chime", data=b"RIFFwav")
+
+        assert result["ok"] is True
+        assert result["action"] == "add_sound"
+        assert result["target"] == "chime"
+        assert result["sound_id"] == "snd-42"
+        req = mock_stub.AddSound.call_args[0][0]
+        assert req.name == "chime"
+        assert req.data == b"RIFFwav"
+
+    def test_add_sound_from_path(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = self._wire(mock_client, "AddSound", sound_id="snd-file")
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(b"AUDIODATA")
+            path = f.name
+
+        result = KachakaCommands(conn).add_sound("bell", path=path)
+
+        assert result["ok"] is True
+        assert result["sound_id"] == "snd-file"
+        assert mock_stub.AddSound.call_args[0][0].data == b"AUDIODATA"
+
+    def test_add_sound_no_data_skips_rpc(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = self._wire(mock_client, "AddSound")
+
+        result = KachakaCommands(conn).add_sound("empty")
+
+        assert result["ok"] is False
+        assert result["action"] == "add_sound"
+        mock_stub.AddSound.assert_not_called()
+
+    def test_play_sound(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = self._wire(mock_client, "PlaySound")
+
+        result = KachakaCommands(conn).play_sound("snd-42", loop=True)
+
+        assert result["ok"] is True
+        assert result["action"] == "play_sound"
+        assert result["target"] == "snd-42"
+        req = mock_stub.PlaySound.call_args[0][0]
+        assert req.sound_id == "snd-42"
+        assert req.loop is True
+
+    def test_play_sound_failure_surfaces_error(self):
+        mock_client = MagicMock()
+        mock_client.get_error.return_value = []
+        conn = _make_conn(mock_client)
+        self._wire(mock_client, "PlaySound", success=False, error_code=42)
+
+        result = KachakaCommands(conn).play_sound("bad-id")
+
+        assert result["ok"] is False
+        assert result["error_code"] == 42
+
+    def test_stop_sound(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = self._wire(mock_client, "StopSound")
+
+        result = KachakaCommands(conn).stop_sound()
+
+        assert result["ok"] is True
+        assert result["action"] == "stop_sound"
+        mock_stub.StopSound.assert_called_once()
+
+    def test_delete_sound(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = self._wire(mock_client, "DeleteSound")
+
+        result = KachakaCommands(conn).delete_sound("snd-42")
+
+        assert result["ok"] is True
+        assert result["action"] == "delete_sound"
+        assert result["target"] == "snd-42"
+        assert mock_stub.DeleteSound.call_args[0][0].sound_id == "snd-42"
+
+
 class TestAutoHoming:
     def test_set_auto_homing_enabled(self):
         mock_client = MagicMock()

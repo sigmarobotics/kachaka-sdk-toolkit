@@ -14,7 +14,9 @@ classifiers = [
 # (mcp -> sse-starlette -> starlette), which conflicts with host pins
 # (observed: starlette 1.3.x breaking fastapi 0.115.x, 2026-07-07).
 dependencies = [
-    "kachaka-api>=3.16",
+    # 3.17 adds the Sound API (custom audio playback) used by
+    # KachakaCommands.{add,play,stop,delete}_sound and list_sounds.
+    "kachaka-api>=3.17",
     "grpcio>=1.66",
     "Pillow>=10.0",
 ]

@@ -426,6 +426,61 @@ class KachakaCommands:
         result = self.sdk.set_speaker_volume(volume)
         return self._result_to_dict(result, action="set_speaker_volume", target=str(volume))
 
+    # ── Custom sounds ─────────────────────────────────────────────────
+    #
+    # Custom audio playback beyond TTS, added in kachaka-api 3.17 (Sound
+    # API). None of these gRPC RPCs are wrapped by the official Python SDK,
+    # so they are dispatched directly through the stub.
+
+    def add_sound(self, name: str, *, path: str = "", data: bytes = b"") -> dict:
+        """Upload a custom sound clip to the robot.
+
+        Provide the audio via *path* (read from disk) or raw *data* bytes
+        (WAV). Returns the assigned ``sound_id`` on success — play it later
+        with :meth:`play_sound`.
+
+        Not decorated with ``@with_retry``: each call registers a *new*
+        clip, so a blind retry after a partial success would duplicate it.
+        """
+        if path and not data:
+            with open(path, "rb") as f:
+                data = f.read()
+        if not data:
+            return {
+                "ok": False,
+                "error": "no audio data (provide path or data)",
+                "action": "add_sound",
+            }
+        request = pb2.AddSoundRequest(name=name, data=data)
+        response = self.sdk.stub.AddSound(request)
+        result = self._result_to_dict(response.result, action="add_sound", target=name)
+        if result["ok"]:
+            result["sound_id"] = response.sound_id
+        return result
+
+    @with_retry()
+    def play_sound(self, sound_id: str, *, loop: bool = False) -> dict:
+        """Play a previously uploaded custom sound by its ID.
+
+        Set *loop* to repeat until :meth:`stop_sound`.
+        """
+        request = pb2.PlaySoundRequest(sound_id=sound_id, loop=loop)
+        response = self.sdk.stub.PlaySound(request)
+        return self._result_to_dict(response.result, action="play_sound", target=sound_id)
+
+    @with_retry()
+    def stop_sound(self) -> dict:
+        """Stop the custom sound currently playing (no-op if none)."""
+        response = self.sdk.stub.StopSound(pb2.StopSoundRequest())
+        return self._result_to_dict(response.result, action="stop_sound")
+
+    @with_retry()
+    def delete_sound(self, sound_id: str) -> dict:
+        """Delete a custom sound clip from the robot by its ID."""
+        request = pb2.DeleteSoundRequest(sound_id=sound_id)
+        response = self.sdk.stub.DeleteSound(request)
+        return self._result_to_dict(response.result, action="delete_sound", target=sound_id)
+
     # ── Shortcuts ─────────────────────────────────────────────────────
 
     @with_retry()

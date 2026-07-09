@@ -550,3 +550,40 @@ class TestTofImage:
 
         result = KachakaQueries(conn).get_tof_image()
         assert result["ok"] is False
+
+
+class TestSounds:
+    def test_list_sounds(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_stub = MagicMock()
+        s1, s2 = MagicMock(), MagicMock()
+        s1.id, s1.name = "snd-1", "chime"
+        s2.id, s2.name = "snd-2", "bell"
+        list_resp = MagicMock()
+        list_resp.sounds = [s1, s2]
+        mock_stub.GetSoundList.return_value = list_resp
+        mock.stub = mock_stub
+
+        result = KachakaQueries(conn).list_sounds()
+
+        assert result["ok"] is True
+        assert result["sounds"] == [
+            {"id": "snd-1", "name": "chime"},
+            {"id": "snd-2", "name": "bell"},
+        ]
+        mock_stub.GetSoundList.assert_called_once()
+
+    def test_list_sounds_empty(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        mock_stub = MagicMock()
+        list_resp = MagicMock()
+        list_resp.sounds = []
+        mock_stub.GetSoundList.return_value = list_resp
+        mock.stub = mock_stub
+
+        result = KachakaQueries(conn).list_sounds()
+        assert result["ok"] is True
+        assert result["sounds"] == []
