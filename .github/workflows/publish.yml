@@ -20,21 +20,32 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Sync version to marketplace.json and setup.cfg
+      - name: Sync versions and push to master
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          jq --arg v "$VERSION" '.plugins[0].version = $v' .claude-plugin/marketplace.json > tmp.json
-          mv tmp.json .claude-plugin/marketplace.json
-          sed -i "s/^version = .*/version = $VERSION/" setup.cfg
-          sed -i "s/^fallback_version = .*/fallback_version = \"$VERSION\"/" pyproject.toml
-
-      - name: Commit version sync if changed
-        run: |
+          sync_versions() {
+            local version="${GITHUB_REF_NAME#v}"
+            jq --arg v "$version" '.plugins[0].version = $v' .claude-plugin/marketplace.json > tmp.json
+            mv tmp.json .claude-plugin/marketplace.json
+            sed -i "s/^version = .*/version = $version/" setup.cfg
+            sed -i "s/^fallback_version = .*/fallback_version = \"$version\"/" pyproject.toml
+          }
+          commit_and_push() {
+            git add .claude-plugin/marketplace.json setup.cfg pyproject.toml
+            git diff --cached --quiet || git commit -m "chore: sync versions to ${GITHUB_REF_NAME}"
+            git push origin HEAD:master
+          }
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .claude-plugin/marketplace.json setup.cfg pyproject.toml
-          git diff --cached --quiet || git commit -m "chore: sync versions to ${GITHUB_REF_NAME}"
-          git push origin HEAD:master
+          sync_versions
+          if ! commit_and_push; then
+            # Tag was pushed before master (tag commit not a descendant of
+            # origin/master) — redo the version sync on the master tip instead
+            # of failing the release.
+            echo "::warning::HEAD:master rejected; regenerating version sync on origin/master"
+            git fetch origin master
+            git worktree add ../version-sync origin/master
+            (cd ../version-sync && sync_versions && commit_and_push)
+          fi
 
       - name: Build
         run: |
