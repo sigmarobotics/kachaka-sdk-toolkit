@@ -1,6 +1,6 @@
 # kachaka-sdk-toolkit
 
-A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 77 tools for AI-driven robot control, and a Skill reference document for development-time agents.
+A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 84 tools for AI-driven robot control, and a Skill reference document for development-time agents.
 
 ## Overview
 
@@ -13,7 +13,7 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 ```mermaid
 graph TD
     subgraph Consumers
-        MCP["MCP Server<br/>(77 tools, stdio)"]
+        MCP["MCP Server<br/>(84 tools, stdio)"]
         SKILL["Skill .md"]
         APP["Your Script<br/>or App"]
     end
@@ -71,7 +71,7 @@ graph TD
 - **Map management** -- Export, import, switch, and create maps from ROS-style PNG occupancy grids. `import_image_as_map` uses gRPC `stream_unary` directly for chunked image upload.
 - **Torch control** -- Set front/back LED torch intensity (0--255) for illumination.
 - **Laser scan** -- Activate on-demand LiDAR scans for a configurable duration.
-- **MCP Server** -- 77 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client. Installed via the `[mcp]` extra so host projects that only need `kachaka_core` stay free of the MCP/starlette dependency stack.
+- **MCP Server** -- 84 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client. Installed via the `[mcp]` extra so host projects that only need `kachaka_core` stay free of the MCP/starlette dependency stack.
 - **Skill document** -- A self-contained reference (`skills/kachaka-sdk/SKILL.md`) for development-time LLM agents.
 
 ## Tech Stack
@@ -636,7 +636,7 @@ annotated = det.annotate_frame(raw, result["objects"])
 
 ## MCP Server
 
-The MCP Server exposes 77 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
+The MCP Server exposes 84 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
 
 ### Running the Server
 
@@ -745,6 +745,16 @@ The controller tools expose `RobotController` through the MCP server, providing 
 | `set_volume` | Set speaker volume (0--10) |
 | `get_volume` | Get current volume |
 
+#### Custom Sounds (5 tools)
+
+| Tool | Description |
+|------|-------------|
+| `list_sounds` | List custom sound clips registered on the robot (id + name) |
+| `add_sound` | Upload a custom sound clip (WAV) — local path or base64 data |
+| `play_sound` | Play an uploaded sound by ID (optional loop) |
+| `stop_sound` | Stop the custom sound currently playing |
+| `delete_sound` | Delete a custom sound clip by ID |
+
 #### Command Control (3 tools)
 
 | Tool | Description |
@@ -825,6 +835,13 @@ The controller tools expose `RobotController` through the MCP server, providing 
 | Tool | Description |
 |------|-------------|
 | `is_ready` | Non-blocking readiness check |
+
+#### Localization (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `localize` | Force re-localization on the current map — recover from localization jumps or after the robot was manually moved |
+| `set_robot_pose` | Override the pose estimate with known map coordinates (immediate RPC); seed before `localize` when the true position is known |
 
 #### Recovery (1 tool)
 
@@ -1094,7 +1111,7 @@ graph LR
 
     subgraph mcp["mcp_server/ — MCP Server layer"]
         M_INIT["__init__.py"]
-        M_SRV["server.py — 77 tools, stdio transport"]
+        M_SRV["server.py — 84 tools, stdio transport"]
     end
 
     subgraph skills["skills/kachaka-sdk/ — Plugin skill"]

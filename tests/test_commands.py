@@ -598,6 +598,45 @@ class TestAutoHoming:
         mock_client.set_auto_homing_enabled.assert_called_once_with(False)
 
 
+class TestLocalization:
+    def test_localize(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
+
+        result = KachakaCommands(conn).localize()
+
+        assert result["ok"] is True
+        assert result["action"] == "localize"
+        assert result["command_id"] == "cmd-1"
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.HasField("localize_command")
+
+    def test_localize_failure(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        _wire_start_command(mock_client, success=False, error_code=10001)
+
+        result = KachakaCommands(conn).localize()
+
+        assert result["ok"] is False
+        assert result["error_code"] == 10001
+
+    def test_set_robot_pose(self):
+        mock_client = MagicMock()
+        mock_client.set_robot_pose.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).set_robot_pose(1.5, -2.0, 0.5)
+
+        assert result["ok"] is True
+        assert result["action"] == "set_robot_pose"
+        assert "command_id" not in result
+        mock_client.set_robot_pose.assert_called_once_with(
+            {"x": 1.5, "y": -2.0, "theta": 0.5}
+        )
+
+
 class TestManualControlShelfReg:
     def test_manual_control_with_shelf_registration(self):
         mock_client = MagicMock()

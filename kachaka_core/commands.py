@@ -807,6 +807,49 @@ class KachakaCommands:
         result = self.sdk.set_auto_homing_enabled(enabled)
         return self._result_to_dict(result, action="set_auto_homing", target=str(enabled))
 
+    # ── Localization ─────────────────────────────────────────────────
+
+    @with_retry()
+    def localize(
+        self,
+        *,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Force the robot to re-run self-localization on the current map.
+
+        Use when the pose estimate has jumped or drifted (e.g. after a
+        localization jump in a feature-poor corridor, or after the robot
+        was carried to a new spot). Fire-and-accept like other commands —
+        drive completion with ``poll_until_complete()``. When the true
+        position is roughly known, seed it first with ``set_robot_pose()``
+        so localization converges to the right hypothesis.
+        """
+        cmd = pb2.Command(localize_command=pb2.LocalizeCommand())
+        result, cid = self._start_command_advanced(
+            cmd,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+            wait_for_completion=False,
+        )
+        return self._result_to_dict(result, action="localize", command_id=cid)
+
+    @with_retry()
+    def set_robot_pose(self, x: float, y: float, theta: float) -> dict:
+        """Override the robot's pose estimate with map coordinates.
+
+        Direct RPC (not a queued command) — takes effect immediately and
+        does not produce a ``command_id``. Typical recovery flow:
+        ``set_robot_pose()`` with the believed position, then ``localize()``
+        to let the robot refine it against the map.
+        """
+        result = self.sdk.set_robot_pose({"x": x, "y": y, "theta": theta})
+        return self._result_to_dict(
+            result, action="set_robot_pose", target=f"({x}, {y}, {theta})"
+        )
+
     # ── Recovery ─────────────────────────────────────────────────────
 
     def restart_robot(self) -> dict:

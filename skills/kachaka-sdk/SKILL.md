@@ -671,6 +671,32 @@ cmds.set_velocity(linear=0.1, angular=0.0)    # Forward slowly
 cmds.stop()                                      # Emergency stop
 ```
 
+## Localization Recovery
+
+For localization jumps (pose teleports to a wrong place in feature-poor
+areas) or after the robot was manually carried somewhere:
+
+```python
+# Force re-localization on the current map (fire-and-accept)
+result = cmds.localize()
+cmds.poll_until_complete(timeout=60.0)
+
+# When the true position is roughly known, seed it first so
+# localization converges to the right hypothesis:
+cmds.set_robot_pose(x=1.5, y=-2.0, theta=0.5)   # direct RPC, immediate
+result = cmds.localize()
+cmds.poll_until_complete(timeout=60.0)
+
+# Verify recovery
+queries.get_pose()
+```
+
+> :warning: **Jump detection**: Detect jumps by watching consecutive poses: a displacement
+> exceeding the robot's physical max speed between two polls is a jump,
+> not movement. After `set_robot_pose()` the estimate changes instantly —
+> always follow with `localize()` + a pose sanity check before resuming
+> navigation.
+
 ## Adding New Functionality
 
 ### Correct flow
@@ -719,6 +745,7 @@ def my_new_command(ip: str, param: str) -> dict:
 | Shelf drop detection | `RobotController` (auto-tracks) | Poll `get_moving_shelf()` yourself |
 | Error descriptions | Auto-enriched in all results | `get_error_definitions()` + manual lookup |
 | gRPC timeout protection | `TimeoutInterceptor` (5s default / 300s long-poll) | Per-call `timeout=` parameter |
+| Recover from localization jump | `cmds.set_robot_pose()` + `cmds.localize()` | Restart the robot or re-map |
 | Deploy script to robot | `playground_upload` + `playground_run` MCP tools | `scp` + `ssh` commands manually |
 | Offline route execution | Playground snippets (scaffold + IMU + route) | Custom scripts from scratch |
 

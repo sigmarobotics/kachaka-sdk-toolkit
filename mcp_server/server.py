@@ -897,6 +897,32 @@ def get_auto_homing(ip: str) -> dict:
     return KachakaQueries(KachakaConnection.get(ip)).get_auto_homing_enabled()
 
 
+# ── Localization ────────────────────────────────────────────────────
+
+@mcp.tool()
+def localize(ip: str) -> dict:
+    """Force the robot to re-run self-localization on the current map.
+
+    Use when the pose estimate has jumped to a wrong place (localization
+    jump) or after the robot was manually carried somewhere. Fire-and-accept:
+    confirm recovery via ``get_command_state`` and ``get_robot_pose``.
+    When the true position is roughly known, call ``set_robot_pose`` first
+    so localization converges to the right hypothesis.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).localize()
+
+
+@mcp.tool()
+def set_robot_pose(ip: str, x: float, y: float, theta: float) -> dict:
+    """Override the robot's pose estimate with known map coordinates.
+
+    ``x``/``y`` in meters, ``theta`` in radians (map frame). Takes effect
+    immediately (direct RPC, not a queued command). Typical recovery flow:
+    set_robot_pose with the believed position, then ``localize`` to refine.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).set_robot_pose(x, y, theta)
+
+
 # ── Recovery ────────────────────────────────────────────────────────
 
 @mcp.tool()
