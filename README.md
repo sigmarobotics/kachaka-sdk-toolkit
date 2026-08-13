@@ -1,6 +1,6 @@
 # kachaka-sdk-toolkit
 
-A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 84 tools for AI-driven robot control, and a Skill reference document for development-time agents.
+A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 87 tools for AI-driven robot control, and a Skill reference document for development-time agents.
 
 ## Overview
 
@@ -13,7 +13,7 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 ```mermaid
 graph TD
     subgraph Consumers
-        MCP["MCP Server<br/>(84 tools, stdio)"]
+        MCP["MCP Server<br/>(87 tools, stdio)"]
         SKILL["Skill .md"]
         APP["Your Script<br/>or App"]
     end
@@ -71,7 +71,7 @@ graph TD
 - **Map management** -- Export, import, switch, and create maps from ROS-style PNG occupancy grids. `import_image_as_map` uses gRPC `stream_unary` directly for chunked image upload.
 - **Torch control** -- Set front/back LED torch intensity (0--255) for illumination.
 - **Laser scan** -- Activate on-demand LiDAR scans for a configurable duration.
-- **MCP Server** -- 84 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client. Installed via the `[mcp]` extra so host projects that only need `kachaka_core` stay free of the MCP/starlette dependency stack.
+- **MCP Server** -- 87 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client. Installed via the `[mcp]` extra so host projects that only need `kachaka_core` stay free of the MCP/starlette dependency stack.
 - **Skill document** -- A self-contained reference (`skills/kachaka-sdk/SKILL.md`) for development-time LLM agents.
 
 ## Tech Stack
@@ -79,7 +79,7 @@ graph TD
 | Component | Version |
 |-----------|---------|
 | Python | >= 3.10, < 3.13 |
-| kachaka-api | >= 3.16 |
+| kachaka-api | >= 3.17 |
 | grpcio | >= 1.66 |
 | mcp[cli] | >= 1.0 (optional `[mcp]` extra — MCP server only) |
 | Pillow | >= 10.0 |
@@ -87,6 +87,13 @@ graph TD
 | pytest-mock | >= 3.15 (dev) |
 | Build system | setuptools >= 68 + setuptools-scm >= 8 |
 | Package manager | uv |
+
+`kachaka-api >= 3.17` is the floor for the whole toolkit (the Sound API needs
+it). Individual features have their own robot-firmware requirements — the
+authoritative per-feature table is the **Feature ↔ Version Matrix** in
+[`skills/kachaka-sdk/SKILL.md`](skills/kachaka-sdk/SKILL.md), which also
+explains why the package version and the firmware version are not the same
+number.
 
 ## Getting Started
 
@@ -232,7 +239,7 @@ Reduces redundant gRPC round-trips for data that rarely changes:
 
 ### KachakaCommands
 
-Robot action commands. All methods return `dict` with an `ok` key. All are decorated with `@with_retry`.
+Robot action commands. All methods return `dict` with an `ok` key. All are decorated with `@with_retry` except the stop family (`stop_manual_drive` / deprecated `stop` / `set_emergency_stop`), which must act immediately rather than retry.
 
 > **Fire-and-accept contract (since 0.6.0):** movement and shelf commands return as soon as the robot *accepts* the command — `{"ok": True}` means accepted, not completed. This bypasses the SDK's blocking long-poll, which has no client deadline and hangs indefinitely if the completion event is lost (observed in production: 82 minutes). Drive completion with `poll_until_complete(timeout=...)`, or use [`RobotController`](#robotcontroller) for supervised execution — it polls with a deadline and always returns within `timeout=` seconds. (`speak()` still blocks until the utterance finishes, bounded by `long_poll_timeout`.) `KachakaCommands` remains the home of actions `RobotController` does not expose (TTS, volume, torch, map switch, shortcuts, etc.).
 >
@@ -240,7 +247,7 @@ Robot action commands. All methods return `dict` with an `ok` key. All are decor
 
 | Method | Description |
 |--------|-------------|
-| `move_to_location(name, source_location_name="")` | Move to a registered location by name or ID. Optional `source_location_name` (3.16.1+) forces the planner to treat the named location as the route's starting point -- useful when localisation is uncertain or a specific corridor is required |
+| `move_to_location(name, source_location_name="")` | Move to a registered location by name or ID. **Never target a location a shelf is parked on (incl. its home)** -- shelves are invisible to the LiDAR on final approach; the robot collides silently. Optional `source_location_name` (3.16.1+) forces the planner to treat the named location as the route's starting point |
 | `move_to_pose(x, y, yaw)` | Move to absolute map coordinates |
 | `move_forward(distance_meter, speed=0.1, mute_sensors=False)` | Move forward (positive) or backward (negative). **Default `speed` is `0.1` m/s** -- 3.16+ firmware rejects `speed=0.0` with error 15508, so calls without an explicit speed now succeed. Set `mute_sensors=True` (3.16.1+) to bypass safety sensors for rescue/recovery when the robot is wedged; collision detection is suppressed -- use with care |
 | `move_by_velocity_muted(signed_velocity, duration_sec)` | Drive at the given m/s for the given seconds with safety sensors muted the entire time (3.16.1+). First-class rescue command. Velocity clamped to [-0.3, 0.3] m/s, duration to [0, 30] s |
@@ -248,8 +255,8 @@ Robot action commands. All methods return `dict` with an `ok` key. All are decor
 | `return_home()` | Return to charger |
 | `move_shelf(shelf, location)` | Pick up shelf and deliver to location |
 | `return_shelf(shelf_name="")` | Return shelf to its home location |
-| `dock_shelf()` | Dock currently held shelf |
-| `undock_shelf()` | Undock currently held shelf |
+| `dock_shelf()` | Engage the shelf directly in front of the robot (does not travel to it; position the robot first) |
+| `undock_shelf()` | Put the carried shelf down here and drive out from under it |
 | `dock_any_shelf_with_registration(location, dock_forward)` | Move to location, dock any shelf there (auto-registers new shelves) |
 | `reset_shelf_pose(shelf_name)` | Reset recorded pose of a shelf |
 | `start_shortcut(shortcut_id)` | Execute a registered shortcut by ID |
@@ -267,7 +274,8 @@ Robot action commands. All methods return `dict` with an `ok` key. All are decor
 | `proceed()` | Resume a command waiting for confirmation |
 | `set_manual_control(enabled)` | Enable/disable velocity control mode |
 | `set_velocity(linear, angular)` | Send velocity (max 0.3 m/s, 1.57 rad/s) |
-| `stop()` | Emergency stop -- zero velocity + disable manual control |
+| `stop_manual_drive()` | Stop manual velocity driving. Does **not** stop autonomous navigation -- use `cancel_command()` for that. (`stop()` is a deprecated alias) |
+| `set_emergency_stop()` | Latched hardware pause (error 21051). **Released only by the physical power button** -- no gRPC path exists. Not exposed as an MCP tool |
 | `poll_until_complete(timeout, command_id="")` | Block until the tracked command finishes. Completion is verified against the `command_id` of the most recently accepted command on this instance (or an explicit one) — never misled by the idle/registration-window state |
 
 ### KachakaQueries
@@ -279,9 +287,9 @@ Read-only status queries. All methods return `dict` with an `ok` key. All are de
 | `get_status()` | Full snapshot: pose, battery, command state, errors, shelf |
 | `get_pose()` | Current position (x, y, theta) |
 | `get_battery()` | Battery percentage and power status |
-| `list_locations()` | All registered locations with pose data |
+| `list_locations()` | All registered locations with pose, `type_name` (charger / shelf home / SLAM marker), and per-location undock flags (`undock_aligning_to_wall`, `undock_avoiding_obstacles`) |
 | `list_locations_digest()` | Lightweight variant (3.16.1+): `[{id, name, type}]` only, no pose. ~58% smaller payload -- intended for picker UIs |
-| `list_shelves()` | All registered shelves with home location |
+| `list_shelves()` | All registered shelves with home location, last known `pose` (None if unreported), and `speed_mode` |
 | `list_shelves_digest()` | Lightweight variant (3.16.1+): `[{id, name}]` only, no home location. Intended for picker UIs |
 | `get_moving_shelf()` | ID of currently carried shelf (or null) |
 | `get_command_state()` | Current command execution state |
@@ -293,7 +301,7 @@ Read-only status queries. All methods return `dict` with an `ok` key. All are de
 | `get_map()` | Current map as base64 PNG with metadata |
 | `list_maps()` | All available maps + current map ID |
 | `get_errors()` | Active error codes |
-| `get_error_definitions()` | All error code definitions from firmware |
+| `get_error_definitions()` | All error code definitions from firmware (title, description, `error_type` severity, ref_url) |
 | `get_serial_number()` | Robot serial number |
 | `get_version()` | Firmware version |
 | `get_speaker_volume()` | Current speaker volume (0--10) |
@@ -636,7 +644,7 @@ annotated = det.annotate_frame(raw, result["objects"])
 
 ## MCP Server
 
-The MCP Server exposes 84 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
+The MCP Server exposes 87 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
 
 ### Running the Server
 
@@ -678,7 +686,7 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `get_connection_state` | Real-time connection health: state (connected/disconnected/unknown), monitoring status, last-ping age, time since last state change |
 | `disconnect_robot` | Remove from connection pool |
 
-#### Status Queries (5 tools)
+#### Status Queries (6 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -686,6 +694,7 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `get_robot_pose` | Current position (x, y, theta) |
 | `get_battery` | Battery percentage + charging status |
 | `get_errors` | Active error codes |
+| `get_error_definitions` | What each error code means, incl. `error_type` severity (live from firmware, ~860 entries) |
 | `get_robot_info` | Serial number + firmware version |
 
 #### Locations and Shelves (5 tools)
@@ -717,8 +726,8 @@ All movement tools are **fire-and-accept**: they return as soon as the robot acc
 |------|-------------|
 | `move_shelf` | Pick up shelf, deliver to location |
 | `return_shelf` | Return shelf to home |
-| `dock_shelf` | Dock held shelf |
-| `undock_shelf` | Undock held shelf |
+| `dock_shelf` | Engage the shelf in front of the robot (no travel) |
+| `undock_shelf` | Put the carried shelf down here |
 | `dock_any_shelf_with_registration` | Move to location, dock any shelf (auto-registers new) |
 | `reset_shelf_pose` | Reset recorded pose of a shelf |
 
@@ -755,11 +764,12 @@ The controller tools expose `RobotController` through the MCP server, providing 
 | `stop_sound` | Stop the custom sound currently playing |
 | `delete_sound` | Delete a custom sound clip by ID |
 
-#### Command Control (3 tools)
+#### Command Control (4 tools)
 
 | Tool | Description |
 |------|-------------|
-| `cancel_command` | Cancel running command |
+| `cancel_command` | Cancel running command -- **the** way to stop a moving robot |
+| `proceed` | Resume a command that is waiting for confirmation |
 | `get_command_state` | Whether a command is running |
 | `get_last_result` | Result of last completed command |
 
@@ -802,13 +812,14 @@ The controller tools expose `RobotController` through the MCP server, providing 
 | `start_shortcut` | Execute a registered shortcut by ID |
 | `get_history` | Command execution history |
 
-#### Manual Control (3 tools)
+#### Manual Control (4 tools)
 
 | Tool | Description |
 |------|-------------|
 | `enable_manual_control` | Enable/disable velocity mode |
+| `get_manual_control` | Read whether velocity mode is currently enabled |
 | `set_velocity` | Set linear + angular velocity |
-| `emergency_stop` | Immediately stop robot |
+| `stop_manual_drive` | Stop manual driving. Does **not** stop autonomous navigation -- use `cancel_command` |
 
 #### Torch / Lighting (2 tools)
 
@@ -1075,20 +1086,33 @@ pytest tests/test_commands.py::TestRetry
 
 | Module | Tests | Covers |
 |--------|-------|--------|
-| `test_connection.py` | 34 | Connection pool, normalisation, ping, resolver, monitoring, caching |
-| `test_commands.py` | 71 | Movement (incl. mute_sensors / move_by_velocity_muted / source_location_id), shelf ops, fire-and-accept + command_id tracking, poll_until_complete verification, speech, shortcuts, map, torch, laser, retry, cancel, stop |
-| `test_queries.py` | 35 | Status, locations (incl. digest), shelves (incl. digest), camera (incl. fresh-frame), intrinsics, ToF, map, errors, info |
+| `test_connection.py` | 42 | Connection pool, normalisation, ping, resolver, monitoring, caching |
+| `test_commands.py` | 86 | Movement (incl. mute_sensors / move_by_velocity_muted / source_location_id), shelf ops, fire-and-accept + command_id tracking, poll_until_complete verification, speech, shortcuts, map, torch, laser, retry, cancel, stop semantics (`stop_manual_drive` + deprecated `stop` + `set_emergency_stop` kept off MCP) |
+| `test_queries.py` | 40 | Status, locations (incl. digest + undock flags + `type_name`), shelves (incl. digest + `HasField` pose + `speed_mode`), camera (incl. fresh-frame), intrinsics, ToF, map, errors (incl. `error_type`), info |
 | `test_error_handling.py` | 13 | Retry modes (count + deadline), backoff, non-retryable errors |
-| `test_interceptors.py` | 6 | TimeoutInterceptor default deadline injection, passthrough |
-| `test_camera.py` | 33 | Lifecycle, capture, stats, errors, callbacks, thread safety, disconnect skip |
-| `test_controller.py` | 48 | State polling, command execution, metrics, racing conditions, disconnect handling |
+| `test_interceptors.py` | 12 | TimeoutInterceptor default deadline injection, passthrough |
+| `test_camera.py` | 34 | Lifecycle, capture, stats, errors, callbacks, thread safety, disconnect skip |
+| `test_controller.py` | 53 | State polling, command execution, metrics, racing conditions, disconnect handling |
 | `test_detection.py` | 14 | Detections, capture+detect, annotation, label mapping, error handling |
 | `test_server_controller.py` | 13 | MCP controller tools: start/stop lifecycle, idempotency, state dict, controller_rotate |
 | `test_transform.py` | 12 | TransformStreamer lifecycle, auto-reconnect, stats, thread safety |
 | `test_playground.py` | 12 | Playground SSH upload/run/stop/log/status (requires `asyncssh` extra) |
-| **Total** | **311 tests** | |
+| **Total** | **331 tests** | |
 
 All tests use the `_clean_pool` autouse fixture to ensure isolation between tests.
+
+HIL tests live in `tests/hil/` and need a real robot. With only `--robot-ip`
+the stationary tests run; tests that drive the robot require an extra opt-in:
+
+```bash
+pytest tests/hil/ -v --robot-ip=192.168.50.133                # stationary only
+pytest tests/hil/ -v --robot-ip=192.168.50.133 --hil-motion   # + driving tests (~3 m)
+```
+
+`tests/hil/test_stop_semantics.py` proves that `cancel_command` stops a moving
+robot and `stop_manual_drive` does not (`--hil-motion`). Its emergency-stop
+case needs a further `--ems-latch` because it leaves the robot latched until
+someone presses the physical power button.
 
 ## Project Structure
 
@@ -1111,7 +1135,7 @@ graph LR
 
     subgraph mcp["mcp_server/ — MCP Server layer"]
         M_INIT["__init__.py"]
-        M_SRV["server.py — 84 tools, stdio transport"]
+        M_SRV["server.py — 87 tools, stdio transport"]
     end
 
     subgraph skills["skills/kachaka-sdk/ — Plugin skill"]
