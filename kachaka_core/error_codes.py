@@ -9,7 +9,12 @@ Two ranges with different semantics:
   block future commands once the upstream active state clears.
 
 Verified live on robot BKP40HD1T (2026-05-07) and from the visual-patrol-v1.5
-LiDAR incident.
+LiDAR incident. Titles cross-checked (2026-08-13) against the robot's own
+master table — 860 entries fetched via ``GetRobotErrorCodeJson``. That table
+is the authority and is available at runtime through
+``KachakaQueries.get_error_definitions()``; the constants below only carve out
+the handful of codes the toolkit needs to *act* on, so there is deliberately
+no attempt to mirror all 860 here.
 """
 
 from __future__ import annotations
@@ -37,8 +42,19 @@ TASK_BLOCKED_CODES = frozenset({
 Resolve the upstream code (in ``errors[]``) and these stop appearing."""
 
 NORMAL_CANCEL_CODES = frozenset({
-    10001,  # Action interrupted (generic cancel)
+    10001,  # Action interrupted (generic cancel) — what cancel_command() yields
 })
+
+TASK_FAILURE_CODES = frozenset({
+    11005,  # {shelf} is not found — not where Kachaka last placed it
+    14606,  # Kachaka is not docked with a furniture
+    19001,  # Failed to move to the destination (obstacle / timeout too short)
+})
+"""Genuine task failures: the robot was healthy and accepted the command, but
+the world did not cooperate. Unlike ``TASK_BLOCKED_CODES`` there is no active
+state code to clear — the caller must fix the physical situation (put the
+shelf back, clear the obstacle) or retry. Seen in production on bio-patrol and
+visual-patrol deployments."""
 
 
 def categorize_active_errors(errors: list[int]) -> str | None:

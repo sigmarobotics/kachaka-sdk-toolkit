@@ -97,8 +97,24 @@ def get_battery(ip: str) -> dict:
 
 @mcp.tool()
 def get_errors(ip: str) -> dict:
-    """Active error codes on the robot."""
+    """Active error codes on the robot.
+
+    Returns bare codes. Use ``get_error_definitions`` to find out what they mean.
+    """
     return KachakaQueries(KachakaConnection.get(ip)).get_errors()
+
+
+@mcp.tool()
+def get_error_definitions(ip: str) -> dict:
+    """Look up what every robot error code means (the firmware's own table).
+
+    Maps each code to title, description, ``error_type`` severity (Fatal /
+    Error / Warn / Ignore / Bug / Recoverable / CallForSupport) and a reference
+    URL. Fetched live from the robot, so it matches its firmware. Large
+    response (~860 codes) — call it to explain a code from ``get_errors`` or
+    ``get_last_result``, not routinely.
+    """
+    return KachakaQueries(KachakaConnection.get(ip)).get_error_definitions()
 
 
 @mcp.tool()
@@ -163,6 +179,12 @@ def move_to_location(
 ) -> dict:
     """Move robot to a registered location by name or ID.
 
+    ⚠️ NEVER target a location a shelf is parked on — including that shelf's
+    home location. Passing shelves en route is fine, but on the final approach
+    a shelf's legs sit inside the LiDAR's filter zone, so the robot drives into
+    it and pushes it across the floor while reporting ``success: True`` with no
+    error code. Use ``move_shelf`` or ``dock_any_shelf_with_registration``.
+
     Use ``list_locations`` first to see available destinations.
     Fire-and-accept: returns as soon as the robot ACCEPTS the command —
     the robot is still moving when this returns. For a blocking move that
@@ -182,6 +204,12 @@ def move_to_location(
 @mcp.tool()
 def move_to_pose(ip: str, x: float, y: float, yaw: float) -> dict:
     """Move robot to absolute map coordinates (x, y, yaw in radians).
+
+    ⚠️ NEVER aim this at a shelf's coordinates. On the final approach the robot
+    has no obstacle signal for it (legs inside the LiDAR filter zone), so it
+    drives into the shelf and pushes it — and the command never completes and
+    never errors, so a caller waiting on it hangs until its own timeout. Use
+    ``move_shelf`` / ``dock_any_shelf_with_registration``.
 
     Fire-and-accept: returns on command accept, not arrival.
     """
@@ -278,7 +306,13 @@ def return_shelf(ip: str, shelf_name: str = "") -> dict:
 
 @mcp.tool()
 def dock_shelf(ip: str) -> dict:
-    """Dock the currently held shelf onto the robot.
+    """Engage the shelf in front of the robot. You must position the robot first.
+
+    This does not travel to the shelf. Get there in two stages: ``move_to_location``
+    to a registered point NEAR the shelf — **never the shelf's own home location**,
+    that aims at the shelf and collides — then short ``move_forward`` steps to line
+    up squarely in front of it. Docking succeeds or fails on that alignment.
+    ``dock_any_shelf_with_registration`` is easier when a suitable location exists.
 
     Fire-and-accept: returns on command accept, not completion.
     """
@@ -287,7 +321,11 @@ def dock_shelf(ip: str) -> dict:
 
 @mcp.tool()
 def undock_shelf(ip: str) -> dict:
-    """Undock the currently held shelf from the robot.
+    """Put the carried shelf down here and drive out from under it.
+
+    The firmware picks the exit direction based on available space. If this
+    fails with 10270/10271 the robot's app settings forbid undocking entirely —
+    that is a human-escalation, not something to retry.
 
     Fire-and-accept: returns on command accept, not completion.
     """
@@ -526,8 +564,24 @@ def delete_sound(ip: str, sound_id: str) -> dict:
 
 @mcp.tool()
 def cancel_command(ip: str) -> dict:
-    """Cancel the currently running command."""
+    """Cancel the currently running command — the correct way to stop the robot.
+
+    This is what actually halts a moving robot: the running command ends with
+    error 10001 (interrupted) and motion stops. ``stop_manual_drive`` does not
+    do this, and the firmware emergency stop is deliberately not exposed here
+    because releasing it requires physically pressing the robot's power button.
+    """
     return KachakaCommands(KachakaConnection.get(ip)).cancel_command()
+
+
+@mcp.tool()
+def proceed(ip: str) -> dict:
+    """Resume a command that is waiting for confirmation to continue.
+
+    Some commands pause mid-execution and wait to be told to carry on. Without
+    this they sit there until they time out.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).proceed()
 
 
 @mcp.tool()
@@ -847,15 +901,31 @@ def enable_manual_control(
 
 
 @mcp.tool()
+def get_manual_control(ip: str) -> dict:
+    """Whether manual velocity control mode is currently enabled.
+
+    ``enable_manual_control`` is fire-and-accept; read this to confirm the mode
+    actually took effect before sending velocities.
+    """
+    return KachakaQueries(KachakaConnection.get(ip)).get_manual_control_enabled()
+
+
+@mcp.tool()
 def set_velocity(ip: str, linear: float, angular: float) -> dict:
     """Set robot velocity (requires manual-control mode). Max: 0.3 m/s, 1.57 rad/s."""
     return KachakaCommands(KachakaConnection.get(ip)).set_velocity(linear, angular)
 
 
 @mcp.tool()
-def emergency_stop(ip: str) -> dict:
-    """Immediately stop the robot and disable manual control."""
-    return KachakaCommands(KachakaConnection.get(ip)).stop()
+def stop_manual_drive(ip: str) -> dict:
+    """Stop manual velocity driving (zero velocity, leave manual-control mode).
+
+    Only affects manual driving started with ``enable_manual_control``. It does
+    NOT stop an autonomous command such as ``move_to_location`` — measured on
+    real hardware, the robot drives on and the command still reports success.
+    To abort a running command use ``cancel_command``.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).stop_manual_drive()
 
 
 # ── Torch / lighting ────────────────────────────────────────────────

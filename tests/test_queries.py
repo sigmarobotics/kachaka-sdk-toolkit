@@ -47,8 +47,10 @@ class TestLocations:
         loc = MagicMock()
         loc.id = "loc-1"
         loc.name = "Kitchen"
-        loc.type = "CHARGER"
+        loc.type = 1  # LOCATION_TYPE_CHARGER
         loc.pose = MagicMock(x=0.0, y=0.0, theta=0.0)
+        loc.undock_shelf_aligning_to_wall = True
+        loc.undock_shelf_avoiding_obstacles = False
         mock.get_locations.return_value = [loc]
         conn = _make_conn(mock)
 
@@ -57,6 +59,26 @@ class TestLocations:
         assert result["ok"] is True
         assert len(result["locations"]) == 1
         assert result["locations"][0]["name"] == "Kitchen"
+        assert result["locations"][0]["type_name"] == "LOCATION_TYPE_CHARGER"
+        assert result["locations"][0]["undock_aligning_to_wall"] is True
+        assert result["locations"][0]["undock_avoiding_obstacles"] is False
+
+    def test_list_locations_slam_marker_type(self):
+        """SLAM markers must be distinguishable — they are not destinations."""
+        mock = MagicMock()
+        loc = MagicMock()
+        loc.id = "L12"
+        loc.name = "標記20"
+        loc.type = 3  # LOCATION_TYPE_SLAM_MARKER
+        loc.pose = MagicMock(x=0.5, y=2.5, theta=-1.57)
+        loc.undock_shelf_aligning_to_wall = False
+        loc.undock_shelf_avoiding_obstacles = False
+        mock.get_locations.return_value = [loc]
+        conn = _make_conn(mock)
+
+        result = KachakaQueries(conn).list_locations()
+
+        assert result["locations"][0]["type_name"] == "LOCATION_TYPE_SLAM_MARKER"
 
     def test_list_locations_digest(self):
         mock = MagicMock()
@@ -86,6 +108,9 @@ class TestShelves:
         shelf.id = "shelf-1"
         shelf.name = "Shelf A"
         shelf.home_location_id = "loc-2"
+        shelf.HasField.return_value = True
+        shelf.pose = MagicMock(x=1.5, y=-0.5, theta=0.25)
+        shelf.speed_mode = 1  # SHELF_SPEED_MODE_LOW
         mock.get_shelves.return_value = [shelf]
         conn = _make_conn(mock)
 
@@ -93,6 +118,40 @@ class TestShelves:
 
         assert result["ok"] is True
         assert result["shelves"][0]["name"] == "Shelf A"
+        assert result["shelves"][0]["pose"] == {"x": 1.5, "y": -0.5, "theta": 0.25}
+        assert result["shelves"][0]["speed_mode"] == "SHELF_SPEED_MODE_LOW"
+
+    def test_list_shelves_pose_at_origin_is_not_none(self):
+        """A shelf parked at (0,0,0) is reported, not mistaken for 'unknown'."""
+        mock = MagicMock()
+        shelf = MagicMock()
+        shelf.id = "shelf-1"
+        shelf.name = "Shelf A"
+        shelf.home_location_id = "loc-2"
+        shelf.HasField.return_value = True
+        shelf.pose = MagicMock(x=0.0, y=0.0, theta=0.0)
+        shelf.speed_mode = 2
+        mock.get_shelves.return_value = [shelf]
+        conn = _make_conn(mock)
+
+        result = KachakaQueries(conn).list_shelves()
+
+        assert result["shelves"][0]["pose"] == {"x": 0.0, "y": 0.0, "theta": 0.0}
+
+    def test_list_shelves_pose_absent_is_none(self):
+        mock = MagicMock()
+        shelf = MagicMock()
+        shelf.id = "shelf-1"
+        shelf.name = "Shelf A"
+        shelf.home_location_id = "loc-2"
+        shelf.HasField.return_value = False
+        shelf.speed_mode = 2
+        mock.get_shelves.return_value = [shelf]
+        conn = _make_conn(mock)
+
+        result = KachakaQueries(conn).list_shelves()
+
+        assert result["shelves"][0]["pose"] is None
 
     def test_list_shelves_digest(self):
         mock = MagicMock()
@@ -265,8 +324,10 @@ class TestErrors:
     def test_error_definitions(self):
         mock = MagicMock()
         err_info = MagicMock()
-        err_info.title_en = "Shelf dropped"
-        err_info.description_en = "The shelf was dropped during movement"
+        err_info.title_en = "Kachaka is not docked with a furniture"
+        err_info.description_en = ""
+        err_info.error_type = "Error"
+        err_info.ref_url = ""
         mock.get_robot_error_code.return_value = {14606: err_info}
         conn = _make_conn(mock)
 
@@ -274,7 +335,11 @@ class TestErrors:
 
         assert result["ok"] is True
         assert 14606 in result["definitions"]
-        assert result["definitions"][14606]["title"] == "Shelf dropped"
+        entry = result["definitions"][14606]
+        assert entry["title"] == "Kachaka is not docked with a furniture"
+        # Severity is what a caller branches on — it must survive the projection.
+        assert entry["error_type"] == "Error"
+        assert entry["ref_url"] == ""
 
 
 class TestRobotInfo:

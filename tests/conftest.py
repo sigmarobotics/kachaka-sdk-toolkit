@@ -12,6 +12,24 @@ def pytest_addoption(parser):
         default="",
         help="Kachaka robot IP for HIL tests (e.g. 192.168.50.133)",
     )
+    parser.addoption(
+        "--hil-motion",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow HIL tests that DRIVE the robot (several metres). Without "
+            "this flag only stationary HIL tests run."
+        ),
+    )
+    parser.addoption(
+        "--ems-latch",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the emergency-stop latch test. It leaves the robot latched; "
+            "recovery needs someone to press the physical power button."
+        ),
+    )
 
 
 @pytest.fixture

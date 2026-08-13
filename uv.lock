@@ -311,7 +311,7 @@ wheels = [
 
 [[package]]
 name = "kachaka-api"
-version = "3.16.1.0"
+version = "3.17.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
@@ -319,9 +319,9 @@ dependencies = [
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/76/2c/33c941029b9445983ed709829770b0d8d98fbe5517f997d0fcc9b6241253/kachaka_api-3.16.1.0.tar.gz", hash = "sha256:ecd0c5d5f7b9f00a9773039285e8b376b97fa59b518debaaf705675bbc75d734", size = 44001, upload-time = "2026-04-28T01:07:01.101Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2f/cf/4b86f829c525f717a7b912b118d310a9da5a4566ae45f89207ebade6749d/kachaka_api-3.17.5.0.tar.gz", hash = "sha256:e3f649d1ce90cea7cf8b3855842caa9341a66122616c388a0ddbe99912f5b3fe", size = 45234, upload-time = "2026-07-09T11:01:37.16Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e7/1c/ffc6c7fc2851daf38768053554aeb4822bc6da98ac541f870b3c56776c2e/kachaka_api-3.16.1.0-py3-none-any.whl", hash = "sha256:27b0bd48cbeed77bbe0642afc16c902a25dd8396f5c6a0b56e10a3e68d3e0b6b", size = 42297, upload-time = "2026-04-28T01:06:59.546Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/03/714f242e392e6e0fea41123200756dced4069408a58bf23a51c7a0487124/kachaka_api-3.17.5.0-py3-none-any.whl", hash = "sha256:37cc9c4c8e56250e08706ab4088cfdbba4fa198ce6f744737213efad282811d4", size = 43440, upload-time = "2026-07-09T11:01:36.05Z" },
 ]
 
 [[package]]
@@ -330,7 +330,6 @@ source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
     { name = "kachaka-api" },
-    { name = "mcp", extra = ["cli"] },
     { name = "pillow" },
 ]
 
@@ -338,6 +337,9 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "pytest-mock" },
+]
+mcp = [
+    { name = "mcp", extra = ["cli"] },
 ]
 
 [package.dev-dependencies]
@@ -349,13 +351,13 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "grpcio", specifier = ">=1.66" },
-    { name = "kachaka-api", specifier = ">=3.16" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.0" },
+    { name = "kachaka-api", specifier = ">=3.17" },
+    { name = "mcp", extras = ["cli"], marker = "extra == 'mcp'", specifier = ">=1.0" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-mock", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["mcp", "dev"]
 
 [package.metadata.requires-dev]
 dev = [

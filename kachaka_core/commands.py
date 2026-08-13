@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import warnings
 from typing import Iterator, Optional
 
 from kachaka_api.generated import kachaka_api_pb2 as pb2
@@ -126,6 +127,16 @@ class KachakaCommands:
     ) -> dict:
         """Move to a registered location by name or ID.
 
+        .. warning::
+           Never target a location a shelf is parked on — a shelf's **home
+           location** included. Travelling past shelves is fine (camera-assisted
+           traversability handles them at range), but during the final approach
+           to the goal a shelf's legs fall inside the LiDAR's near-field filter,
+           leaving no obstacle signal: the robot drives into the shelf and
+           pushes it across the floor while ``get_errors()`` stays empty and
+           this call may still report ``success: True``. Use :meth:`move_shelf`
+           or :meth:`dock_any_shelf_with_registration` instead.
+
         The resolver is initialised on first use so that name lookups work.
 
         Args:
@@ -164,7 +175,17 @@ class KachakaCommands:
         tts_on_success: str = "",
         title: str = "",
     ) -> dict:
-        """Move to an absolute map coordinate ``(x, y, yaw)``."""
+        """Move to an absolute map coordinate ``(x, y, yaw)``.
+
+        .. warning::
+           Never aim this at a shelf's coordinates (see
+           :meth:`move_to_location` for why the final approach has no obstacle
+           signal). Worse than the location case: the command **neither
+           completes nor errors** — the robot wedges against the shelf and
+           keeps pushing while the command stays in flight, so anything waiting
+           on :meth:`poll_until_complete` hangs until its own timeout and only
+           :meth:`cancel_command` ends it.
+        """
         cmd = pb2.Command(move_to_pose_command=pb2.MoveToPoseCommand(x=x, y=y, yaw=yaw))
         result, cid = self._start_command_advanced(
             cmd,
@@ -342,7 +363,19 @@ class KachakaCommands:
 
     @with_retry()
     def dock_shelf(self, **kwargs) -> dict:
-        """Dock the currently held shelf."""
+        """Engage the shelf standing directly in front of the robot.
+
+        Not "secure the shelf already being carried" — this picks a shelf *up*.
+        It also does not travel to the shelf: position the robot first with
+        :meth:`move_to_location` to a registered point **near** the shelf (never
+        the shelf's own home location — that aims at the shelf and collides),
+        then close the gap with short :meth:`move_forward` steps until the robot
+        is squarely in front of it. Success hinges on that alignment.
+
+        The entry direction is the firmware's choice; the proto message carries
+        no parameters. Fails with 10255 if the robot is already carrying
+        something.
+        """
         cmd = pb2.Command(dock_shelf_command=pb2.DockShelfCommand())
         result, cid = self._start_command_advanced(
             cmd, wait_for_completion=False, **kwargs
@@ -676,11 +709,79 @@ class KachakaCommands:
             result, action="set_velocity", target=f"lin={linear}, ang={angular}"
         )
 
-    def stop(self) -> dict:
-        """Emergency stop — sets velocity to zero and disables manual control."""
+    def stop_manual_drive(self) -> dict:
+        """Stop manual velocity driving — zero velocity, leave manual mode.
+
+        **This does NOT stop an autonomous navigation command.** Measured on
+        BKP40HD1T (firmware 3.17.8, 2026-08-13): calling this 2.6 s into a
+        ``move_to_location`` had no effect at all — the robot kept driving and
+        the command finished with ``success=True``. Use
+        :meth:`cancel_command` to abort a running command.
+
+        Only meaningful after :meth:`set_manual_control` (True). The
+        underlying ``sdk.set_robot_stop()`` is
+        ``set_robot_velocity(0, 0) + set_manual_control_enabled(False)``, and
+        the SDK's ``set_robot_velocity`` silently *enables* manual control
+        when the first attempt fails, so calling this outside manual mode
+        toggles the manual-control flag on and straight back off.
+
+        That toggle races: measured on real hardware, ``get_manual_control_enabled()``
+        sometimes still reads ``True`` for tens of milliseconds after this call
+        returns (1 of 3 trials). Wait ~0.5 s before trusting a read taken
+        immediately afterwards.
+        """
         try:
             self.sdk.set_robot_stop()
-            return {"ok": True, "action": "stop"}
+            return {"ok": True, "action": "stop_manual_drive"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stop(self) -> dict:
+        """Deprecated alias for :meth:`stop_manual_drive`.
+
+        The old name implied an emergency stop; it never was one. Scheduled
+        for removal one release after 0.9.0.
+        """
+        warnings.warn(
+            "KachakaCommands.stop() is deprecated: it never stopped autonomous "
+            "navigation. Use cancel_command() to abort a running command, or "
+            "stop_manual_drive() to stop manual velocity driving.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        result = self.stop_manual_drive()
+        if result.get("ok"):
+            result["action"] = "stop"
+        return result
+
+    def set_emergency_stop(self) -> dict:
+        """⚠️ LATCHED hardware pause — released ONLY by the physical power button.
+
+        This is the software equivalent of pressing the robot's pause button.
+        It raises active error ``21051`` and **there is no gRPC path to
+        release it** — the kachaka-api proto has no counterpart RPC, and the
+        official docs say ``電源ボタンを押して解除してください``.
+
+        Never call this on a robot nobody can physically reach. It is
+        deliberately **not** exposed as an MCP tool for that reason.
+
+        Measured on BKP40HD1T (firmware 3.17.8, 2026-08-13): ``21051``
+        appears ~1.9 s after the call, and every software release path fails
+        — ``cancel_command()``, ``proceed()``, ``set_manual_control(True)``
+        (rejected with 12401), ``set_manual_control(False)``,
+        ``stop_manual_drive()``, and issuing a fresh movement command. Note
+        that a movement command issued while latched still returns
+        ``ok=True`` with a ``command_id``; it merely fails later with
+        ``10107``. Gate on :meth:`KachakaQueries.is_ready` instead.
+        """
+        try:
+            error_code = self.sdk.set_emergency_stop()
+            return {
+                "ok": error_code == 0,
+                "action": "set_emergency_stop",
+                "error_code": error_code,
+                "recovery_hint": "press_power_button",
+            }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

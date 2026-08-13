@@ -96,7 +96,15 @@ class KachakaQueries:
                     "id": loc.id,
                     "name": loc.name,
                     "type": str(loc.type),
+                    # `type` alone is a stringified enum ordinal ("3"), which
+                    # tells a caller nothing. SLAM markers in particular need
+                    # to be distinguishable from ordinary destinations.
+                    "type_name": pb2.LocationType.Name(loc.type),
                     "pose": {"x": loc.pose.x, "y": loc.pose.y, "theta": loc.pose.theta},
+                    # Per-location undock behaviour — without these, shelf
+                    # placement quirks at a given spot look inexplicable.
+                    "undock_aligning_to_wall": loc.undock_shelf_aligning_to_wall,
+                    "undock_avoiding_obstacles": loc.undock_shelf_avoiding_obstacles,
                 }
                 for loc in locs
             ],
@@ -123,7 +131,13 @@ class KachakaQueries:
 
     @with_retry()
     def list_shelves(self) -> dict:
-        """All registered shelves."""
+        """All registered shelves, including each shelf's last known pose.
+
+        ``pose`` is ``None`` when the robot has not reported one. The
+        distinction matters: a shelf legitimately parked at the map origin
+        also reads ``(0, 0, 0)``, so ``HasField`` — not a truthiness check —
+        is what separates "unknown" from "at the origin".
+        """
         shelves = self.sdk.get_shelves()
         return {
             "ok": True,
@@ -132,6 +146,14 @@ class KachakaQueries:
                     "id": s.id,
                     "name": s.name,
                     "home_location_id": s.home_location_id,
+                    "pose": (
+                        {"x": s.pose.x, "y": s.pose.y, "theta": s.pose.theta}
+                        if s.HasField("pose")
+                        else None
+                    ),
+                    # App-configured travel speed for this shelf; "…_LOW" means
+                    # it is deliberately carried slowly (unstable load).
+                    "speed_mode": pb2.ShelfSpeedMode.Name(s.speed_mode),
                 }
                 for s in shelves
             ],
@@ -365,7 +387,15 @@ class KachakaQueries:
     def get_error_definitions(self) -> dict:
         """All known error code definitions from the robot firmware.
 
-        Returns a dict mapping error_code (int) to {title, description}.
+        Returns a dict mapping error_code (int) to
+        ``{title, description, error_type, ref_url}``. This is the robot's own
+        master table (~860 entries on firmware 3.17.x), fetched live, so it
+        stays correct across firmware upgrades.
+
+        ``error_type`` is the severity the firmware assigns — ``Fatal``,
+        ``Error``, ``Warn``, ``Ignore``, ``Bug``, ``Recoverable``,
+        ``CallForSupport`` — and is the field to branch on when deciding
+        whether a failure is worth stopping for.
         """
         raw = self.sdk.get_robot_error_code()
         definitions = {}
@@ -373,6 +403,8 @@ class KachakaQueries:
             definitions[code] = {
                 "title": getattr(info, "title_en", str(info)),
                 "description": getattr(info, "description_en", ""),
+                "error_type": getattr(info, "error_type", ""),
+                "ref_url": getattr(info, "ref_url", ""),
             }
         return {"ok": True, "definitions": definitions}
 

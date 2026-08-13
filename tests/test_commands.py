@@ -722,13 +722,65 @@ class TestCancelCommand:
 
 
 class TestStop:
-    def test_emergency_stop(self):
+    def test_stop_manual_drive(self):
         mock_client = MagicMock()
         conn = _make_conn(mock_client)
 
-        result = KachakaCommands(conn).stop()
+        result = KachakaCommands(conn).stop_manual_drive()
         assert result["ok"] is True
+        assert result["action"] == "stop_manual_drive"
         mock_client.set_robot_stop.assert_called_once()
+
+    def test_stop_is_deprecated_alias(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+
+        with pytest.warns(DeprecationWarning, match="never stopped autonomous"):
+            result = KachakaCommands(conn).stop()
+
+        assert result["ok"] is True
+        assert result["action"] == "stop"
+        mock_client.set_robot_stop.assert_called_once()
+
+    def test_stop_manual_drive_reports_failure(self):
+        mock_client = MagicMock()
+        mock_client.set_robot_stop.side_effect = RuntimeError("boom")
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).stop_manual_drive()
+        assert result["ok"] is False
+        assert "boom" in result["error"]
+
+
+class TestEmergencyStop:
+    def test_set_emergency_stop(self):
+        mock_client = MagicMock()
+        mock_client.set_emergency_stop.return_value = 0
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).set_emergency_stop()
+
+        assert result["ok"] is True
+        assert result["error_code"] == 0
+        # The caller must be told how to undo this — there is no gRPC path.
+        assert result["recovery_hint"] == "press_power_button"
+        mock_client.set_emergency_stop.assert_called_once()
+
+    def test_set_emergency_stop_nonzero_code_is_failure(self):
+        mock_client = MagicMock()
+        mock_client.set_emergency_stop.return_value = 12401
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).set_emergency_stop()
+        assert result["ok"] is False
+        assert result["error_code"] == 12401
+
+    def test_not_exposed_as_mcp_tool(self):
+        """The latch has no software release, so models must not reach it."""
+        from mcp_server import server
+
+        assert not hasattr(server, "set_emergency_stop")
+        assert not hasattr(server, "emergency_stop")
 
 
 def _state_resp(state, command_id=""):
