@@ -710,6 +710,58 @@ result = ctrl.move_to_location("nonexistent")
 - Falls back gracefully to `error_code=NNNNN` if the fetch fails or code is unknown
 - Same enrichment in both `controller.py` and `commands.py`
 
+### Shelf drop detection — the concrete interface
+
+`RobotController` is the shelf-drop detector. This is how to consume it:
+
+```python
+def on_drop(shelf_id: str) -> None:          # called from the polling thread
+    alert_operator(f"shelf {shelf_id} dropped in transit")
+
+ctrl = RobotController(conn, on_shelf_dropped=on_drop)
+ctrl.start()
+
+result = ctrl.move_shelf("Shelf A", "Station 3", timeout=180)
+
+ctrl.state.shelf_dropped        # bool — latched True once a drop is detected
+ctrl.state.moving_shelf_id      # str | None — currently carried shelf
+ctrl.reset_shelf_monitor()      # clear the latched flag + stop monitoring
+```
+
+Semantics you can rely on (from the implementation):
+
+- **Armed by `ctrl.move_shelf()`**, before the command is dispatched. A drop
+  fires the callback (with the shelf id), sets `state.shelf_dropped = True`
+  (latched until `reset_shelf_monitor()`), and logs a warning. There is **no
+  drop-specific robot error code** — this flag/callback is the only signal.
+- **Dock-phase absences never false-positive**: monitoring waits until
+  `get_moving_shelf_id()` has confirmed the shelf at least once; only
+  *confirmed-docked-then-gone* counts as a drop.
+- **A failed read is not a drop.** Read errors during monitoring are logged
+  and ignored — only a *successful* read returning empty triggers. (Apply the
+  same rule in any watcher you write yourself: connection loss means "shelf
+  state unknown", never "shelf dropped".)
+- `ctrl.return_shelf()` disarms monitoring when it completes, so the
+  legitimate release at the destination does not leave a stale armed monitor.
+
+**Blind window — the one gap to design around**: the monitor polls inside the
+command-execution loop, so it only watches **while a controller command is
+running**. Between commands (arrived, waiting for the next task) a lost shelf
+goes unnoticed until something next reads shelf state. If your deployment
+must catch that, run your own low-rate `get_moving_shelf()` watcher during
+idle windows, with two guards: suppress it around intentional releases
+(undock/return in progress), and count only successful-but-empty reads —
+N consecutive *read failures* mean "robot unreachable, shelf unknown", which
+is a different alert.
+
+### Other recovery APIs referenced above
+
+```python
+cmds.reset_shelf_pose("Shelf A")   # overwrite the recorded pose (fix for 11005/11103)
+# No physical verification happens — re-dock afterwards to re-measure truth.
+cmds.restart_robot()               # reboot; clears Fatal-class codes (e.g. 21004)
+```
+
 ### Racing condition behavior (tested on real robot)
 
 - `_execute_command` is **not thread-safe** — serialise command calls from the caller side
@@ -1236,7 +1288,7 @@ def my_new_command(ip: str, param: str) -> dict:
 | Monitor connection health | Auto-on via `get()`; read `conn.state` / `connection_info()` | Own ping loop |
 | Handle disconnection | Built-in (5-layer resilience) | Custom reconnection logic |
 | Track camera frame stats | `streamer.stats` (drop rate, recovery) | Manual frame counters |
-| Shelf drop detection | `RobotController` (auto-tracks) | Poll `get_moving_shelf()` yourself |
+| Shelf drop detection | `RobotController` (`on_shelf_dropped` + `state.shelf_dropped`; see its section) | Re-poll during commands — only the idle-window watcher described there is yours to write |
 | Error descriptions | Auto-enriched in all results | `get_error_definitions()` + manual lookup |
 | gRPC timeout protection | `TimeoutInterceptor` (5s default / 300s long-poll) | Per-call `timeout=` parameter |
 | Recover from localization jump | `cmds.set_robot_pose()` + `cmds.localize()` | Restart the robot or re-map |
