@@ -23,7 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # MCP server: install as kachaka-sdk-toolkit[mcp]
-mcp = ["mcp[cli]>=1.0"]
+# <2 is load-bearing: mcp 2.0.0 removed mcp.server.fastmcp, which kills the
+# server at import time (surfaces as CONNECTION_CLOSED in Claude's /mcp).
+mcp = ["mcp[cli]>=1.0,<2"]
 dev = ["pytest", "pytest-mock"]
 
 [project.urls]

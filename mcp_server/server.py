@@ -18,9 +18,14 @@ try:
     from mcp.server.fastmcp import FastMCP, Image
     from mcp.types import TextContent
 except ImportError as _exc:  # pragma: no cover
+    # Report the REAL import error: a missing `mcp` package and an
+    # incompatible one (e.g. mcp 2.x, which removed mcp.server.fastmcp)
+    # both land here, and hiding _exc once cost us a debugging session.
     raise SystemExit(
-        "MCP server dependencies are not installed — "
-        "install with: pip install 'kachaka-sdk-toolkit[mcp]'"
+        "MCP server failed to import its dependencies "
+        f"({type(_exc).__name__}: {_exc}) — install/repair with: "
+        "pip install 'kachaka-sdk-toolkit[mcp]' "
+        "(requires mcp>=1.0,<2)"
     ) from _exc
 
 from kachaka_core.commands import KachakaCommands
