@@ -16,3 +16,4 @@ docs/superpowers/
 .sigma/
 wireshark capture/
 .playwright-mcp/
+build/

@@ -1139,6 +1139,12 @@ same conditions `cancel_command()` stopped it after 0.11 m with error `10001`.
 The old name for this method was `stop()`; it is deprecated for exactly this
 reason.
 
+**Abandoning a blocking MCP tool call does not stop the robot.** Over stdio
+(how Claude runs this server), the `controller_*` blocking tools cannot see
+that the caller gave up — the robot keeps driving to its goal. To stop it,
+issue `cancel_command` as its own call. (The blocking tools do stream
+progress with live pose while they run.)
+
 **`set_emergency_stop()` is a one-way door** and is deliberately absent from the
 MCP tool surface. Every software release path was tried and all of them failed —
 `cancel_command()`, `proceed()`, `set_manual_control(True)` (rejected with

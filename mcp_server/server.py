@@ -9,23 +9,28 @@ Transport: stdio (default for Claude Desktop / Claude Code).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import time
 
 try:
-    from mcp.server.fastmcp import FastMCP, Image
+    # mcp >= 2: FastMCP became MCPServer; Context/Image live in
+    # mcp.server.mcpserver (NOT mcp.server.context — that is the low-level
+    # dispatcher context, a different class).
+    from mcp.server import MCPServer
+    from mcp.server.mcpserver import Context, Image
     from mcp.types import TextContent
 except ImportError as _exc:  # pragma: no cover
     # Report the REAL import error: a missing `mcp` package and an
-    # incompatible one (e.g. mcp 2.x, which removed mcp.server.fastmcp)
+    # incompatible one (mcp 1.x has no MCPServer; 2.x removed fastmcp)
     # both land here, and hiding _exc once cost us a debugging session.
     raise SystemExit(
         "MCP server failed to import its dependencies "
         f"({type(_exc).__name__}: {_exc}) — install/repair with: "
         "pip install 'kachaka-sdk-toolkit[mcp]' "
-        "(requires mcp>=1.0,<2)"
+        "(requires mcp>=2,<3)"
     ) from _exc
 
 from kachaka_core.commands import KachakaCommands
@@ -38,7 +43,7 @@ from kachaka_core.transform import TransformStreamer
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-mcp = FastMCP(
+mcp = MCPServer(
     "kachaka-robot",
     instructions=(
         "Kachaka Robot control tools. All tools require an ``ip`` parameter "
@@ -435,76 +440,151 @@ def get_controller_state(ip: str) -> dict:
     }
 
 
+async def _blocking_controller_call(ip: str, ctrl, ctx, fn, *, label: str) -> dict:
+    """Run a blocking RobotController call without freezing the MCP loop.
+
+    The call runs in a worker thread. While it runs:
+
+    - Progress is reported once a second (elapsed + live pose from the
+      controller's background polling) — a no-op when the client did not
+      supply a progress token.
+    - If this coroutine is cancelled, ``cancel_command()`` is dispatched so
+      the ROBOT stops too. Transport caveat (mcp 2.0.0, measured): the
+      modern in-memory/streamable-http stacks deliver peer cancellation as
+      CancelledError here, but the **stdio compatibility path ignores
+      notifications/cancelled entirely** — over stdio nothing cancels this
+      coroutine, so an abandoning client does NOT stop the robot. The
+      handler is kept because it is correct where cancellation IS delivered,
+      and becomes load-bearing the moment stdio grows interrupt support.
+    """
+    loop = asyncio.get_running_loop()
+    thread = loop.run_in_executor(None, fn)
+    t0 = time.time()
+    try:
+        while not thread.done():
+            await asyncio.sleep(1.0)  # cancellation lands on this await
+            if ctx is not None:
+                try:
+                    st = ctrl.state
+                    await ctx.report_progress(
+                        time.time() - t0,
+                        None,
+                        f"{label}: {time.time() - t0:.0f}s, "
+                        f"pose ({st.pose_x:.2f}, {st.pose_y:.2f})",
+                    )
+                except Exception:  # progress must never kill the command
+                    pass
+        return thread.result()
+    except asyncio.CancelledError:
+        logger.warning("MCP client cancelled %s — dispatching cancel_command", label)
+        try:
+            KachakaCommands(KachakaConnection.get(ip)).cancel_command()
+        except Exception:
+            logger.exception("cancel_command after client cancel failed")
+        raise
+
+
 @mcp.tool()
-def controller_move_shelf(ip: str, shelf_name: str, location_name: str) -> dict:
+async def controller_move_shelf(
+    ip: str, shelf_name: str, location_name: str, ctx: Context = None,
+) -> dict:
     """Move a shelf to a location via the background controller.
 
     Uses command_id verification and auto-starts shelf drop monitoring.
+    Blocks until done. To stop it, call ``cancel_command`` from another
+    turn — over stdio, merely abandoning this call does NOT stop the robot.
     Requires ``start_controller`` first.
     """
-    key = _controller_key(ip)
-    ctrl = _controllers.get(key)
+    ctrl = _controllers.get(_controller_key(ip))
     if ctrl is None:
         return {"ok": False, "error": "controller not started"}
-    return ctrl.move_shelf(shelf_name, location_name)
+    return await _blocking_controller_call(
+        ip, ctrl, ctx,
+        lambda: ctrl.move_shelf(shelf_name, location_name),
+        label=f"move_shelf {shelf_name}→{location_name}",
+    )
 
 
 @mcp.tool()
-def controller_return_shelf(ip: str, shelf_name: str = "") -> dict:
+async def controller_return_shelf(
+    ip: str, shelf_name: str = "", ctx: Context = None,
+) -> dict:
     """Return a shelf to its home via the background controller.
 
-    Auto-stops shelf drop monitoring. Requires ``start_controller`` first.
+    Auto-stops shelf drop monitoring. Blocks until done — to stop it, call
+    ``cancel_command`` (abandoning the call does not stop the robot over
+    stdio). Requires ``start_controller`` first.
     """
-    key = _controller_key(ip)
-    ctrl = _controllers.get(key)
+    ctrl = _controllers.get(_controller_key(ip))
     if ctrl is None:
         return {"ok": False, "error": "controller not started"}
-    return ctrl.return_shelf(shelf_name)
+    return await _blocking_controller_call(
+        ip, ctrl, ctx,
+        lambda: ctrl.return_shelf(shelf_name),
+        label=f"return_shelf {shelf_name or '(current)'}",
+    )
 
 
 @mcp.tool()
-def controller_move_to_location(ip: str, location_name: str) -> dict:
+async def controller_move_to_location(
+    ip: str, location_name: str, ctx: Context = None,
+) -> dict:
     """Move to a location via the background controller.
 
-    Uses command_id verification and deadline-based retry.
+    Uses command_id verification and deadline-based retry. Blocks until
+    arrival. To stop it, call ``cancel_command`` from another turn — over
+    stdio, merely abandoning this call does NOT stop the robot.
     Requires ``start_controller`` first.
     """
-    key = _controller_key(ip)
-    ctrl = _controllers.get(key)
+    ctrl = _controllers.get(_controller_key(ip))
     if ctrl is None:
         return {"ok": False, "error": "controller not started"}
-    return ctrl.move_to_location(location_name)
+    return await _blocking_controller_call(
+        ip, ctrl, ctx,
+        lambda: ctrl.move_to_location(location_name),
+        label=f"move_to_location {location_name}",
+    )
 
 
 @mcp.tool()
-def controller_rotate(ip: str, angle_radian: float) -> dict:
+async def controller_rotate(
+    ip: str, angle_radian: float, ctx: Context = None,
+) -> dict:
     """Rotate in place via the background controller — blocks until done.
 
     Positive = counter-clockwise. Uses command_id verification, so it is
     safe against the registration-window race that makes fire-and-accept
-    polling misjudge completion. Requires ``start_controller`` first.
+    polling misjudge completion. To stop it mid-way, call ``cancel_command``.
+    Requires ``start_controller`` first.
     """
-    key = _controller_key(ip)
-    ctrl = _controllers.get(key)
+    ctrl = _controllers.get(_controller_key(ip))
     if ctrl is None:
         return {"ok": False, "error": "controller not started"}
-    return ctrl.rotate_in_place(angle_radian)
+    return await _blocking_controller_call(
+        ip, ctrl, ctx,
+        lambda: ctrl.rotate_in_place(angle_radian),
+        label=f"rotate {angle_radian:.2f}rad",
+    )
 
 
 @mcp.tool()
-def controller_dock_any_shelf(
-    ip: str, location_name: str, dock_forward: bool = False,
+async def controller_dock_any_shelf(
+    ip: str, location_name: str, dock_forward: bool = False, ctx: Context = None,
 ) -> dict:
     """Move to a location and dock any shelf there via the background controller.
 
-    Unregistered shelves are automatically registered as new.
-    Requires ``start_controller`` first.
+    Unregistered shelves are automatically registered as new. Blocks until
+    done — to stop it, call ``cancel_command`` (abandoning the call does not
+    stop the robot over stdio). Requires ``start_controller`` first.
     """
-    key = _controller_key(ip)
-    ctrl = _controllers.get(key)
+    ctrl = _controllers.get(_controller_key(ip))
     if ctrl is None:
         return {"ok": False, "error": "controller not started"}
-    return ctrl.dock_any_shelf_with_registration(location_name, dock_forward)
+    return await _blocking_controller_call(
+        ip, ctrl, ctx,
+        lambda: ctrl.dock_any_shelf_with_registration(location_name, dock_forward),
+        label=f"dock_any_shelf @{location_name}",
+    )
 
 
 # ── Speech ───────────────────────────────────────────────────────────

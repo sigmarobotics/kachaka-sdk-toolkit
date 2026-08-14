@@ -2,26 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Stub out the ``mcp`` package before importing the server module,
-# since the MCP SDK may not be installed in the test environment.
+# Stub out the ``mcp`` package (v2 layout) before importing the server
+# module, since the MCP SDK may not be installed in the test environment.
 if "mcp" not in sys.modules:
     _mcp_mod = ModuleType("mcp")
     _mcp_server_mod = ModuleType("mcp.server")
-    _mcp_fastmcp_mod = ModuleType("mcp.server.fastmcp")
+    _mcp_mcpserver_mod = ModuleType("mcp.server.mcpserver")
     _mcp_types_mod = ModuleType("mcp.types")
 
-    class _FakeFastMCP:
+    class _FakeMCPServer:
         def __init__(self, *a, **kw): pass
         def tool(self):
             """No-op decorator — return the original function unchanged."""
             return lambda fn: fn
         def run(self, **kw): pass
+
+    class _FakeContext:
+        pass
 
     class _FakeImage:
         def __init__(self, *a, **kw): pass
@@ -29,15 +33,17 @@ if "mcp" not in sys.modules:
     class _FakeTextContent:
         def __init__(self, *a, **kw): pass
 
-    _mcp_fastmcp_mod.FastMCP = _FakeFastMCP
-    _mcp_fastmcp_mod.Image = _FakeImage
+    _mcp_server_mod.MCPServer = _FakeMCPServer
+    _mcp_mcpserver_mod.MCPServer = _FakeMCPServer
+    _mcp_mcpserver_mod.Context = _FakeContext
+    _mcp_mcpserver_mod.Image = _FakeImage
     _mcp_types_mod.TextContent = _FakeTextContent
     _mcp_mod.server = _mcp_server_mod
     _mcp_mod.types = _mcp_types_mod
-    _mcp_server_mod.fastmcp = _mcp_fastmcp_mod
+    _mcp_server_mod.mcpserver = _mcp_mcpserver_mod
     sys.modules["mcp"] = _mcp_mod
     sys.modules["mcp.server"] = _mcp_server_mod
-    sys.modules["mcp.server.fastmcp"] = _mcp_fastmcp_mod
+    sys.modules["mcp.server.mcpserver"] = _mcp_mcpserver_mod
     sys.modules["mcp.types"] = _mcp_types_mod
 
 from kachaka_core.connection import KachakaConnection
@@ -127,22 +133,22 @@ class TestStartControllerIdempotent:
 
 class TestControllerCommandWithoutStart:
     def test_move_shelf_without_start(self):
-        result = controller_move_shelf("10.0.0.1", "ShelfA", "Room1")
+        result = asyncio.run(controller_move_shelf("10.0.0.1", "ShelfA", "Room1"))
         assert result["ok"] is False
         assert result["error"] == "controller not started"
 
     def test_return_shelf_without_start(self):
-        result = controller_return_shelf("10.0.0.1", "ShelfA")
+        result = asyncio.run(controller_return_shelf("10.0.0.1", "ShelfA"))
         assert result["ok"] is False
         assert result["error"] == "controller not started"
 
     def test_move_to_location_without_start(self):
-        result = controller_move_to_location("10.0.0.1", "Kitchen")
+        result = asyncio.run(controller_move_to_location("10.0.0.1", "Kitchen"))
         assert result["ok"] is False
         assert result["error"] == "controller not started"
 
     def test_rotate_without_start(self):
-        result = controller_rotate("10.0.0.1", 1.57)
+        result = asyncio.run(controller_rotate("10.0.0.1", 1.57))
         assert result["ok"] is False
         assert result["error"] == "controller not started"
 
@@ -158,7 +164,7 @@ class TestControllerRotate:
         with patch.object(
             ctrl, "rotate_in_place", return_value={"ok": True, "action": "rotate_in_place"}
         ) as mock_rotate:
-            result = controller_rotate(ip, 1.57)
+            result = asyncio.run(controller_rotate(ip, 1.57))
         assert result["ok"] is True
         mock_rotate.assert_called_once_with(1.57)
         ctrl.stop()

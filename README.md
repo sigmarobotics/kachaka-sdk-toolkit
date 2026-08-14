@@ -81,7 +81,7 @@ graph TD
 | Python | >= 3.10, < 3.13 |
 | kachaka-api | >= 3.17 |
 | grpcio | >= 1.66 |
-| mcp[cli] | >= 1.0 (optional `[mcp]` extra — MCP server only) |
+| mcp[cli] | >= 2, < 3 (optional `[mcp]` extra — MCP server only; ported to the mcp 2.x `MCPServer` API) |
 | Pillow | >= 10.0 |
 | pytest | >= 9.0 (dev) |
 | pytest-mock | >= 3.15 (dev) |
