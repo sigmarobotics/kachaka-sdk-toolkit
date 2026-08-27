@@ -953,6 +953,116 @@ scp -P 26500 playground_offline_route.py kachaka@<robot-ip>:/home/kachaka/
 ssh -p 26500 kachaka@<robot-ip> "nohup python3 -u /home/kachaka/playground_offline_route.py > /tmp/route.log 2>&1 &"
 ```
 
+## Remote Access via Tailscale (VPN)
+
+Everything above assumes you share a LAN with the robot. For off-site deployment, maintenance, and fleet operations, install [Tailscale](https://tailscale.com/) **inside the robot's Playground container**. The container is non-root and has no `/dev/net/tun`, but Tailscale's official [userspace networking mode](https://tailscale.com/docs/concepts/userspace-networking) works without either. This recipe is production-verified on multiple deployed robots (firmware 3.15--3.17).
+
+### Network Topology
+
+```mermaid
+graph LR
+    subgraph laptop["Your Laptop / Server"]
+        TSC["Tailscale client"]
+    end
+
+    subgraph robot["Kachaka Robot"]
+        subgraph cont["Playground Container"]
+            TSD["tailscaled<br/>(userspace mode)"]
+            SSHD["sshd :22"]
+            JUP["JupyterLab :26501"]
+        end
+        HOST["Robot host services<br/>gRPC :26400 · private API :2021<br/>(100.94.1.1)"]
+    end
+
+    TSC -->|"tailnet (DERP relay)"| TSD
+    TSD -->|"inbound → container localhost"| SSHD
+    TSD -->|"inbound → container localhost"| JUP
+    TSD -->|"tailscale serve rules"| HOST
+
+    style laptop fill:#fff3e0
+    style cont fill:#e8f5e9
+    style robot fill:#f5f5f5
+```
+
+Key consequence of running **inside the container**: inbound tailnet traffic lands on the *container's* localhost, not the robot host. Port numbers therefore differ between LAN and tailnet:
+
+| Service | Via LAN | Via tailnet |
+|---------|---------|-------------|
+| SSH | `<robot-ip>` port **26500** (host-side Docker map) | `100.x.y.z` port **22** (container sshd directly) |
+| JupyterLab | port 26501 | port 26501 |
+| Robot gRPC | port 26400 | port 26400 -- **only after the serve rule below** |
+| Private API (official mobile app) | port 2021 | port 2021 -- **only after the serve rule below** |
+
+Deploy scripts that hard-code `SSH_PORT=26500` should parameterize it (LAN 26500 / tailnet 22).
+
+### Installation
+
+Prerequisites: SSH access over LAN (port 26500), and outbound internet from the robot -- verify with `python3 -c "import urllib.request; print(urllib.request.urlopen('https://www.gstatic.com/generate_204').status)"` (expect `204`).
+
+```bash
+# 1. Download the arm64 static build on your laptop (robot is aarch64), then push it
+curl -fsSL -o ts_arm64.tgz "https://pkgs.tailscale.com/stable/tailscale_<version>_arm64.tgz"
+scp -P 26500 ts_arm64.tgz kachaka@<robot-ip>:/home/kachaka/
+
+# 2. Extract and start the daemon (everything lives under /home/kachaka -- no system dirs)
+ssh -p 26500 kachaka@<robot-ip> '
+  mkdir -p /home/kachaka/tailscale-bin /home/kachaka/tailscale-state
+  tar -xzf /home/kachaka/ts_arm64.tgz -C /home/kachaka/tailscale-bin --strip-components=1
+  rm /home/kachaka/ts_arm64.tgz
+  nohup /home/kachaka/tailscale-bin/tailscaled --tun=userspace-networking \
+    --statedir=/home/kachaka/tailscale-state \
+    --socket=/home/kachaka/tailscaled.sock >> /tmp/tailscaled.log 2>&1 &'
+
+# 3. Register the node -- prints an auth URL; open it in a browser logged into your tailnet
+ssh -p 26500 kachaka@<robot-ip> \
+  '/home/kachaka/tailscale-bin/tailscale --socket=/home/kachaka/tailscaled.sock up --hostname <site>-<robot-name>'
+```
+
+After authorization, `tailscale status --json` reports `"BackendState": "Running"` and the node's `100.x.y.z` address.
+
+### Standard Serve Rules (gRPC + Mobile App)
+
+Inbound tailnet traffic only reaches the container's own localhost. Services on the robot host (`100.94.1.1`) must be proxied per-port with `tailscale serve`. Every deployment gets these two rules:
+
+```bash
+TS="/home/kachaka/tailscale-bin/tailscale --socket=/home/kachaka/tailscaled.sock"
+$TS serve --bg --tcp=26400 tcp://100.94.1.1:26400   # robot gRPC (kachaka-api)
+$TS serve --bg --tcp=2021  tcp://100.94.1.1:2021    # private API (official mobile app)
+```
+
+Rules persist in the statedir across reboots -- set once per robot. With port 2021 served, a phone running Tailscale can control the robot through the **official Kachaka app** from anywhere.
+
+Verification from any tailnet machine:
+
+```bash
+ssh -p 22 kachaka@100.x.y.z echo ok                      # SSH (note: port 22, not 26500)
+python3 -c "import kachaka_api; \
+  print(kachaka_api.KachakaApiClient('100.x.y.z:26400').get_robot_serial_number())"
+python3 -c "import ssl; ssl.get_server_certificate(('100.x.y.z', 2021))"   # no exception = OK
+```
+
+### Boot Persistence
+
+The robot reboots daily (~04:04). State in `/home/kachaka` survives, so no re-authorization is needed -- but the daemon must be restarted. Append (never overwrite -- the file is a shared boot hook that other deployments may also use) to `/home/kachaka/kachaka_startup.sh`:
+
+```bash
+# --- tailscale ---
+/home/kachaka/tailscale-bin/tailscaled --tun=userspace-networking \
+  --statedir=/home/kachaka/tailscale-state \
+  --socket=/home/kachaka/tailscaled.sock >> /tmp/tailscaled.log 2>&1 &
+# --- end tailscale ---
+```
+
+### Operational Notes
+
+| Topic | Detail |
+|-------|--------|
+| Latency | Userspace mode behind container NAT almost always relays via DERP (~80 ms). Fine for deployment, scp, and photo retrieval -- do not expect LAN throughput. |
+| Memory | `tailscaled` RSS ~31 MB. |
+| Key expiry | Disable it in the admin console (Machines → ⋯ → Disable key expiry), or the node needs re-authorization after ~180 days. |
+| Firmware updates | May wipe `/home/kachaka` entirely -- binary, state, and startup hook included. Re-run this recipe afterwards (re-authorization required, since the state is gone too). |
+| Security | The tailnet node key lives on the robot. Keep the invariant from the Playground section: API keys and other secrets never land on the robot. |
+
 ## Error Handling
 
 ### Automatic Retry
