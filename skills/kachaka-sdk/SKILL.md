@@ -944,6 +944,59 @@ cmds.switch_map(map_id)
 - `width`, `height` — image dimensions in pixels
 - `origin_x`, `origin_y` — world coordinates (meters) of the bottom-left pixel (ROS convention)
 
+### Map lifecycle — what "a new map" means for stored coordinates
+
+Anything you persist in world coordinates (zone polygons, door waypoints,
+staging poses, custom no-go areas) lives in **one map's frame**. Kachaka has
+three different things a customer calls "making a new map", and they are not
+equally destructive (Sigma support docs: `/support/pfr/map-destination/
+pro-update-map/` and `pro-extend-map/`):
+
+| App action | New map entry (UUID)? | Locations / shelves / no-go areas | World frame |
+|---|---|---|---|
+| **Create map** (fresh SLAM) | yes | **gone** — nothing carries over, every destination is re-registered | **new** origin + rotation; all stored coordinates are garbage |
+| **Update map** (re-scan existing areas) | yes, user-named copy | kept and re-applied | preserved — aligned through the charger pose |
+| **Extend map** (scan new areas only) | yes, user-named copy | kept and re-applied | preserved — same alignment |
+
+Consequences that matter for an app:
+
+- **Do not bind config to the map UUID.** Update and extend both mint a new
+  UUID while keeping the frame, so a UUID check would raise a false alarm on
+  every routine re-scan and would still miss the one dangerous case
+  (frame drift). Bind to **geometry**: keep a snapshot of a few reference
+  locations you depend on (door hop points, staging point, the kiosk point)
+  and compare their current `list_locations()` poses against it.
+- **Frame continuity is only as good as the charger alignment** when the
+  update/extend was started. A sloppy dock start shifts *everything* by a
+  few centimetres to tens of centimetres in one direction — the customer
+  then usually runs another update to fix it (a map literally named
+  「錯位更新」, "misalignment update", turned up on a site robot). Expect
+  small, coherent offsets after any re-scan; only a large or rotated
+  discrepancy means a fresh map.
+- **The PNG origin moves whenever the map grows** — `origin_x/origin_y`
+  describe the bottom-left pixel, and extending the map adds pixels. World
+  coordinates of existing points do not move. Always redo world↔pixel math
+  from the *current* `get_map()` metadata; never cache the origin.
+- **Destinations are edited constantly.** Adding, moving, renaming and
+  deleting locations in the app is routine customer behaviour. IDs (`L09`)
+  survive a rename and survive update/extend, but a fresh map restarts the
+  numbering with different meanings — so match by ID *within* a map
+  lineage, never across one. Anything in your config that references a
+  destination by name must be re-validated against `list_locations()` on
+  startup, on reconnect and before dispatch; a deleted or renamed
+  destination should fail loudly at validation, not at the robot.
+- `get_locations()` / `get_shelves()` are cached in `KachakaConnection` and
+  only refreshed on reconnect — after the customer edits the map, either
+  reconnect or call the refresh hooks before trusting the list.
+
+A practical reconcile routine: on startup / reconnect / map-page load, fetch
+`current_map_id` + `list_locations()`, then classify: same UUID & anchors
+unchanged → nothing; new UUID & every anchor within ~0.5 m → update/extend,
+accept and re-snapshot; anchors missing or displaced by metres / rotated →
+fresh map, mark all stored geometry invalid and refuse geometry-dependent
+commands until a human re-registers or migrates it (a similarity transform
+fitted on ≥2 re-registered anchors can carry polygons across for review).
+
 ### Reading the occupancy grid
 
 Applications keep reimplementing this and keep getting it slightly different,
