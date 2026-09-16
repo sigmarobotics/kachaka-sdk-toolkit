@@ -16,6 +16,9 @@ classifiers = [
 dependencies = [
     # 3.17 adds the Sound API (custom audio playback) used by
     # KachakaCommands.{add,play,stop,delete}_sound and list_sounds.
+    # depart_from_charger / switch_map(docking_state_inherit_method=...) need
+    # 3.18.1 but degrade to an error dict on 3.17 — raise the floor once
+    # 3.18.1 is on PyPI.
     "kachaka-api>=3.17",
     "grpcio>=1.66",
     "Pillow>=10.0",

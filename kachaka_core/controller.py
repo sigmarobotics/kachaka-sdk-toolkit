@@ -730,7 +730,8 @@ class RobotController:
         """Move forward (positive) or backward (negative) by ``distance_meter``.
 
         ``speed`` is the absolute travel speed in m/s, range (0, 0.3].
-        The firmware rejects ``speed=0.0`` with error 15508.
+        Firmware 3.16 rejects ``speed=0.0`` with error 15508 (the vendor
+        fixed the no-speed error in 3.17.5; 0.0 there is unverified). Firmware before 3.18.1 may rotate at the end of the move.
 
         Args:
             mute_sensors: When True (kachaka-api 3.16.1+), bypass safety

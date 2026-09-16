@@ -1,6 +1,6 @@
 # kachaka-sdk-toolkit
 
-A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 87 tools for AI-driven robot control, and a Skill reference document for development-time agents.
+A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 88 tools for AI-driven robot control, and a Skill reference document for development-time agents.
 
 ## Overview
 
@@ -13,7 +13,7 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 ```mermaid
 graph TD
     subgraph Consumers
-        MCP["MCP Server<br/>(87 tools, stdio)"]
+        MCP["MCP Server<br/>(88 tools, stdio)"]
         SKILL["Skill .md"]
         APP["Your Script<br/>or App"]
     end
@@ -71,7 +71,7 @@ graph TD
 - **Map management** -- Export, import, switch, and create maps from ROS-style PNG occupancy grids. `import_image_as_map` uses gRPC `stream_unary` directly for chunked image upload.
 - **Torch control** -- Set front/back LED torch intensity (0--255) for illumination.
 - **Laser scan** -- Activate on-demand LiDAR scans for a configurable duration.
-- **MCP Server** -- 87 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client. Installed via the `[mcp]` extra so host projects that only need `kachaka_core` stay free of the MCP/starlette dependency stack.
+- **MCP Server** -- 88 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client. Installed via the `[mcp]` extra so host projects that only need `kachaka_core` stay free of the MCP/starlette dependency stack.
 - **Skill document** -- A self-contained reference (`skills/kachaka-sdk/SKILL.md`) for development-time LLM agents.
 
 ## Tech Stack
@@ -79,7 +79,7 @@ graph TD
 | Component | Version |
 |-----------|---------|
 | Python | >= 3.10, < 3.13 |
-| kachaka-api | >= 3.17 |
+| kachaka-api | >= 3.17 (3.18.1 for `depart_from_charger` / `switch_map` inherit method) |
 | grpcio | >= 1.66 |
 | mcp[cli] | >= 2, < 3 (optional `[mcp]` extra — MCP server only; ported to the mcp 2.x `MCPServer` API) |
 | Pillow | >= 10.0 |
@@ -89,11 +89,15 @@ graph TD
 | Package manager | uv |
 
 `kachaka-api >= 3.17` is the floor for the whole toolkit (the Sound API needs
-it). Individual features have their own robot-firmware requirements — the
+it). `depart_from_charger` and `switch_map`'s `docking_state_inherit_method`
+need kachaka-api 3.18.1; on 3.17 they return `ok: False` with an explanatory
+error. Individual features have their own robot-firmware requirements — the
 authoritative per-feature table is the **Feature ↔ Version Matrix** in
 [`skills/kachaka-sdk/SKILL.md`](skills/kachaka-sdk/SKILL.md), which also
 explains why the package version and the firmware version are not the same
-number.
+number. Per-release firmware history (behaviour changes, bugfixes, Pro-only
+features, app settings from 1.0 onward) is in
+[`skills/kachaka-sdk/references/firmware-release-notes.md`](skills/kachaka-sdk/references/firmware-release-notes.md).
 
 ## Getting Started
 
@@ -249,10 +253,11 @@ Robot action commands. All methods return `dict` with an `ok` key. All are decor
 |--------|-------------|
 | `move_to_location(name, source_location_name="")` | Move to a registered location by name or ID. **Never target a location a shelf is parked on (incl. its home)** -- shelves are invisible to the LiDAR on final approach; the robot collides silently. Optional `source_location_name` (3.16.1+) forces the planner to treat the named location as the route's starting point |
 | `move_to_pose(x, y, yaw)` | Move to absolute map coordinates |
-| `move_forward(distance_meter, speed=0.1, mute_sensors=False)` | Move forward (positive) or backward (negative). **Default `speed` is `0.1` m/s** -- 3.16+ firmware rejects `speed=0.0` with error 15508, so calls without an explicit speed now succeed. Set `mute_sensors=True` (3.16.1+) to bypass safety sensors for rescue/recovery when the robot is wedged; collision detection is suppressed -- use with care |
+| `move_forward(distance_meter, speed=0.1, mute_sensors=False)` | Move forward (positive) or backward (negative). **Default `speed` is `0.1` m/s** -- 3.16 firmware rejects `speed=0.0` with error 15508 (the vendor fixed the no-speed error in 3.17.5; what 0.0 does there is unverified), so calls without an explicit speed succeed on every firmware. Firmware before 3.18.1 may rotate at the end of the move. Set `mute_sensors=True` (3.16.1+) to bypass safety sensors for rescue/recovery when the robot is wedged; collision detection is suppressed -- use with care |
 | `move_by_velocity_muted(signed_velocity, duration_sec)` | Drive at the given m/s for the given seconds with safety sensors muted the entire time (3.16.1+). First-class rescue command. Velocity clamped to [-0.3, 0.3] m/s, duration to [0, 30] s |
 | `rotate_in_place(angle_radian)` | Rotate in place (positive = counter-clockwise) |
 | `return_home()` | Return to charger |
+| `depart_from_charger()` | Drive slightly forward off the charging dock; no-op when not docked (firmware 3.18.1+) |
 | `move_shelf(shelf, location)` | Pick up shelf and deliver to location |
 | `return_shelf(shelf_name="")` | Return shelf to its home location |
 | `dock_shelf()` | Engage the shelf directly in front of the robot (does not travel to it; position the robot first) |
@@ -260,10 +265,10 @@ Robot action commands. All methods return `dict` with an `ok` key. All are decor
 | `dock_any_shelf_with_registration(location, dock_forward)` | Move to location, dock any shelf there (auto-registers new shelves) |
 | `reset_shelf_pose(shelf_name)` | Reset recorded pose of a shelf |
 | `start_shortcut(shortcut_id)` | Execute a registered shortcut by ID |
-| `switch_map(map_id)` | Switch active map (invalidates Tier 2 cache) |
-| `export_map(map_id, output_path)` | Export map to binary file (Kachaka proprietary format) |
+| `switch_map(map_id, *, pose_x, pose_y, pose_theta, inherit_docking_state, docking_state_inherit_method)` | Switch active map (invalidates Tier 2 cache). `inherit_docking_state` keeps a docked shelf (Pro); `docking_state_inherit_method` is `"unspecified"` / `"shelf_id_based"` / `"fiducial_id_based"` |
+| `export_map(map_id, output_path)` | Export map to binary file (Kachaka proprietary format). Can fail with 12117 while moving -- dock and retry |
 | `import_map(file_path)` | Import a previously exported map backup |
-| `import_image_as_map(image_path, resolution, ...)` | Import ROS-style PNG occupancy grid as a new map |
+| `import_image_as_map(image_path, resolution, ...)` | Import ROS-style PNG occupancy grid as a new map (firmware 3.14.4+; the vendor describes the output as a Kachaka Pro map) |
 | `speak(text)` | Text-to-speech |
 | `set_speaker_volume(volume)` | Set volume 0--10 (clamped) |
 | `set_front_torch(intensity)` | Set front LED torch intensity (0--255) |
@@ -644,7 +649,7 @@ annotated = det.annotate_frame(raw, result["objects"])
 
 ## MCP Server
 
-The MCP Server exposes 87 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
+The MCP Server exposes 88 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
 
 ### Running the Server
 
@@ -707,7 +712,7 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `list_shelves_digest` | Lightweight shelves list (id, name) |
 | `get_moving_shelf` | Currently carried shelf ID |
 
-#### Movement (6 tools)
+#### Movement (7 tools)
 
 All movement tools are **fire-and-accept**: they return as soon as the robot accepts the command, not on arrival. Use the `controller_*` tools for blocking moves that return on completion.
 
@@ -719,6 +724,7 @@ All movement tools are **fire-and-accept**: they return as soon as the robot acc
 | `move_by_velocity_muted` | Drive at a signed velocity for a fixed duration with sensors muted (rescue command, clamped to ±0.3 m/s and 30 s) |
 | `rotate` | Rotate in place |
 | `return_home` | Return to charger |
+| `depart_from_charger` | Drive slightly forward off the charging dock (firmware 3.18.1+) |
 
 #### Shelf Operations (6 tools)
 
@@ -802,7 +808,7 @@ The controller tools expose `RobotController` through the MCP server, providing 
 | `switch_map` | Switch active map (invalidates Tier 2 cache) |
 | `export_map` | Export map to binary file (Kachaka proprietary format) |
 | `import_map` | Import previously exported map backup |
-| `import_image_as_map` | Import ROS-style PNG occupancy grid as a new map |
+| `import_image_as_map` | Import ROS-style PNG occupancy grid as a new map (firmware 3.14.4+) |
 
 #### Shortcuts and History (3 tools)
 
@@ -1043,7 +1049,7 @@ python3 -c "import ssl; ssl.get_server_certificate(('100.x.y.z', 2021))"   # no 
 
 ### Boot Persistence
 
-The robot reboots daily (~04:04). State in `/home/kachaka` survives, so no re-authorization is needed -- but the daemon must be restarted. Append (never overwrite -- the file is a shared boot hook that other deployments may also use) to `/home/kachaka/kachaka_startup.sh`:
+The robot reboots daily (default window 04:00--04:10; the time is configurable on Kachaka Pro since firmware 3.16.1, and the restart is skipped when uptime is too short or the clock is unsynced). State in `/home/kachaka` survives, so no re-authorization is needed -- but the daemon must be restarted. Append (never overwrite -- the file is a shared boot hook that other deployments may also use) to `/home/kachaka/kachaka_startup.sh`:
 
 ```bash
 # --- tailscale ---
@@ -1245,7 +1251,7 @@ graph LR
 
     subgraph mcp["mcp_server/ — MCP Server layer"]
         M_INIT["__init__.py"]
-        M_SRV["server.py — 87 tools, stdio transport"]
+        M_SRV["server.py — 88 tools, stdio transport"]
     end
 
     subgraph skills["skills/kachaka-sdk/ — Plugin skill"]

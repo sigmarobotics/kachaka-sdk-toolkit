@@ -283,6 +283,16 @@ def return_home(ip: str) -> dict:
     return KachakaCommands(KachakaConnection.get(ip)).return_home()
 
 
+@mcp.tool()
+def depart_from_charger(ip: str) -> dict:
+    """Drive slightly forward to leave the charging dock.
+
+    Firmware 3.18.1+. Does nothing when the robot is not on the dock.
+    Fire-and-accept: returns on command accept, not when the move finishes.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).depart_from_charger()
+
+
 # ── Shelf operations ─────────────────────────────────────────────────
 
 @mcp.tool()
@@ -887,6 +897,7 @@ def export_map(ip: str, map_id: str, output_path: str) -> dict:
 
     Use ``list_maps`` to find available map IDs.
     The file can be re-imported later with ``import_map``.
+    Can fail with 12117 while the robot is moving — dock it and retry.
     """
     return KachakaCommands(KachakaConnection.get(ip)).export_map(map_id, output_path)
 
@@ -909,12 +920,18 @@ def switch_map(
     pose_y: float | None = None,
     pose_theta: float | None = None,
     inherit_docking_state: bool = False,
+    docking_state_inherit_method: str = "unspecified",
 ) -> dict:
     """Switch the robot to a different map.
 
     Use ``list_maps`` first to find available map IDs.
     Optionally specify an initial pose (x, y, theta).
     When no pose is given, the charger pose of the target map is used.
+
+    inherit_docking_state (Kachaka Pro only): keep the docked shelf across
+    the switch. docking_state_inherit_method: how that shelf is matched on
+    the new map — "unspecified" (firmware default), "shelf_id_based" or
+    "fiducial_id_based".
     """
     return KachakaCommands(KachakaConnection.get(ip)).switch_map(
         map_id,
@@ -922,6 +939,7 @@ def switch_map(
         pose_y=pose_y,
         pose_theta=pose_theta,
         inherit_docking_state=inherit_docking_state,
+        docking_state_inherit_method=docking_state_inherit_method,
     )
 
 
@@ -936,6 +954,7 @@ def import_image_as_map(
 ) -> dict:
     """Import a PNG occupancy grid image as a new map (ROS-style format).
 
+    Firmware 3.14.4+; the vendor note describes the output as a Kachaka Pro map.
     The image should be a grayscale PNG where white=free, black=wall, gray=unknown.
     ``resolution`` is meters per pixel (e.g. 0.025 = 2.5cm/px).
     Charger pose (x, y, theta) specifies the charging dock position in world coordinates.
@@ -1090,7 +1109,8 @@ def restart_robot(ip: str) -> dict:
 
     Use only when ``is_ready`` returns ``recovery_hint="restart_robot"``.
     Does NOT clear paused state (21051), which requires the physical
-    power button.
+    power button. On firmware before 3.17.10 the first move after a
+    restart with a shelf docked may fail — retry it once.
     """
     return KachakaCommands(KachakaConnection.get(ip)).restart_robot()
 

@@ -74,21 +74,42 @@ firmware `3.17.8` while the package was `3.17.5` is normal.
 | Feature | toolkit API | kachaka-api ≥ | firmware ≥ | On older firmware |
 |---|---|---|---|---|
 | Custom sounds | `list_sounds` / `add_sound` / `play_sound` / `stop_sound` / `delete_sound` | 3.17 | 3.17 | RPC absent — call fails |
-| Map-switch docking inheritance | `switch_map(...)` docking inherit method | 3.17 | 3.17 | Field ignored |
+| Map-switch docking inheritance method (Pro) | `switch_map(docking_state_inherit_method=…)` | 3.18.1 | 3.17 | Field ignored |
 | Lightweight list queries | `list_locations_digest` / `list_shelves_digest` | 3.16.1 | 3.16.1 | RPC absent — use `list_locations` / `list_shelves` |
 | Route start hint | `move_to_location(source_location_name=…)` | 3.16.1 | 3.16.1 | Field ignored — planner picks its own start |
 | Safety-sensor muting | `move_forward(mute_sensors=True)`, `move_by_velocity_muted` | 3.16.1 | 3.16.1 | Field ignored — sensors stay active |
-| `speed=0.0` rejected (error 15508) | `move_forward` | — | 3.16 | Older firmware accepts 0.0 and never moves |
+| `speed=0.0` rejected (error 15508) | `move_forward` | — | 3.16 (fixed in 3.17.5) | Older firmware accepts 0.0 and never moves. 3.17.5+ no longer errors without a speed — what 0.0 does there is unverified, so keep passing `speed` |
+| Leave the dock | `depart_from_charger()` | 3.18.1 | 3.18.1 | Unverified — gate on `conn.version` before calling |
+| No trailing rotation after a forward move | `move_forward` | — | 3.18.1 | May rotate at the end of the move — re-read `get_pose()` theta before trusting the heading |
+| First move after a restart with a shelf docked | `restart_robot()` / daily restart, then any move | — | 3.17.10 | First move may fail — retry it once |
+| Docking re-aligns the pose only to a registered dock within ~3 m | `return_home()`, pushing the robot onto its dock | — | 3.18.1 | Pose jumps to the layout's dock position even from far away |
+| Physical e-stop button state via error `21057` (Pro e-stop model; where it surfaces is unverified) | `get_errors()` (expected) | — | 3.18.1 | Not reported |
+| Map from an image | `import_image_as_map` | 3.14.4 | 3.14.4 | RPC absent |
 
 The toolkit itself pins `kachaka-api >= 3.17` (the Sound API needs the
-generated stubs), so the package column matters only if you are pinned to an
-older toolkit release. The firmware column is the one to check per robot:
-everything not listed above works on any firmware this toolkit supports.
+generated stubs). The two 3.18.1 rows need `pip install -U kachaka-api`
+once 3.18.1 is on PyPI — until then `depart_from_charger()` and a non-default
+`docking_state_inherit_method` return `ok: False` with an explanatory error.
+The firmware column is the one to check per robot: everything not listed
+above works on any firmware this toolkit supports.
+
+Per-release history — bugfixes, behaviour changes, Pro-only features and app
+settings from 1.0 through 3.18.1 — lives in
+[`references/firmware-release-notes.md`](references/firmware-release-notes.md).
+Check it when robots on different firmware behave differently for the same
+call; this table stays the source of truth for toolkit API gates.
 
 **Kachaka Pro only** (standard-model firmware rejects these regardless of
 version): `dock_any_shelf_with_registration` (proto: "available only in
-Kachaka Pro"), `switch_map(inherit_docking_state_and_docked_shelf=True)`,
+Kachaka Pro"), `switch_map(inherit_docking_state=True)`,
 wall-marker precision parking, and self-localization markers.
+
+Also Pro-scoped per the vendor release notes (what a standard model does with
+the call is unverified): `import_image_as_map` (3.14.4+), and the
+designated-line / inter-location-route features that
+`move_to_location(source_location_name=…)` steers — without them the hint has
+nothing to act on. Speed zones, slope areas, Environment Change Ignore Areas
+and multiple charging docks are Pro app features too.
 
 ```python
 # Gate a version-sensitive call at runtime
@@ -262,6 +283,9 @@ cmds.rotate_in_place(1.57)    # 90° counter-clockwise
 
 # Return to charger
 cmds.return_home()
+
+# Leave the charging dock (firmware 3.18.1+; does nothing when not on the dock)
+cmds.depart_from_charger()
 
 # Poll until command finishes (completion verified against the command_id
 # of the most recently accepted command on this instance)
@@ -465,7 +489,10 @@ Both flags are read-only here; writing them needs the app (or the private LAN
 API). A Pro-only third mode stops against a printed **wall marker** above the
 destination for tighter accuracy — it only engages while carrying furniture.
 Failures: `11309` = marker not found; `11308` = marker found but alignment
-failed (placement, registration, obstacles or floor state).
+failed (placement, registration, obstacles or floor state). Since 3.10.6 the
+stop heading follows the destination furniture's orientation. The destination's
+"Readjust When Stopped" toggle for this mode is broken on 3.17.5 (fixed in
+3.17.8). On 3.18.1+ the mode turns the front torch on in dark mode by itself.
 
 The full symptom → app-setting recommendation table lives in **"Advising Users
 on App Settings"** below.
@@ -504,8 +531,21 @@ robot's own table including an `error_type` severity.
 
 ```python
 cmds.speak("Patrol complete")
-cmds.set_speaker_volume(5)    # 0–10
+cmds.set_speaker_volume(5)    # 0–10; 0 is fully silent on firmware ≥ 3.5.1
+
+# Speak when the command completes successfully (the app's "arrival message")
+cmds.move_to_location("Kitchen", tts_on_success="到了")
 ```
+
+`tts_on_success` is accepted by `move_to_location`, `move_to_pose`,
+`move_shelf`, `return_home`, `depart_from_charger`,
+`dock_any_shelf_with_registration`, `speak` and `localize` (and via `**kwargs`
+by `return_shelf` / `dock_shelf` / `undock_shelf`) — **not** by `start_shortcut`, and no MCP
+tool exposes it yet.
+
+The robot also talks on its own: "Loading 〇〇" when bringing furniture
+(3.12.3+) and "canceled during pause" when a pause kills a task (`10105`,
+3.3.7+). Don't mistake either for your own `speak()` calls.
 
 ## Custom sounds (kachaka-api 3.17+)
 
@@ -766,6 +806,7 @@ cmds.restart_robot()               # reboot; clears Fatal-class codes (e.g. 2100
 
 - `_execute_command` is **not thread-safe** — serialise command calls from the caller side
 - **Command B cancels A**: A receives `error_code=10001` (interrupted), B completes normally
+- **Command B may not be yours**: app Routines (time / voice / multi-function-button triggers), shortcuts and the Kachaka Button all command the same robot. Before debugging an unexplained cancel, find out what else drives this robot
 - **Concurrent commands**: One wins, the other gets TIMEOUT (its command_id never appears in GetLastCommandResult)
 - **Short timeout + new command**: Robot keeps moving after controller timeout; `cancel_all=True` (default) on the new command cancels the residual movement
 - **No deadlock observed** — concurrent use is unsafe but not catastrophic; no execution lock needed
@@ -939,6 +980,12 @@ cmds.switch_map(map_id)
 > ROS-style occupancy grid — export/import round-trips must use
 > `export_map` / `import_map` (the proprietary binary format) instead.
 
+> :warning: `export_map` while the robot is moving can fail with `12117` — put
+> it on the dock and retry. `import_image_as_map` needs firmware 3.14.4+ (the
+> vendor note describes its output as a Kachaka Pro map). Firmware 3.11.11+ reports an in-progress map switch through the
+> raw `IsReady` RPC, which `queries.is_ready()` deliberately does not call —
+> don't dispatch moves the instant `switch_map()` returns.
+
 **Map metadata fields:**
 - `resolution` — meters per pixel
 - `width`, `height` — image dimensions in pixels
@@ -954,7 +1001,7 @@ pro-update-map/` and `pro-extend-map/`):
 
 | App action | New map entry (UUID)? | Locations / shelves / no-go areas | World frame |
 |---|---|---|---|
-| **Create map** (fresh SLAM) | yes | **gone** — nothing carries over, every destination is re-registered | **new** origin + rotation; all stored coordinates are garbage |
+| **Create map** (fresh SLAM) | yes | **gone** — nothing carries over, every destination is re-registered (unless the "keep current layout" variant below is used) | **new** origin + rotation; all stored coordinates are garbage |
 | **Update map** (re-scan existing areas) | yes, user-named copy | kept and re-applied | preserved — aligned through the charger pose |
 | **Extend map** (scan new areas only) | yes, user-named copy | kept and re-applied | preserved — same alignment |
 
@@ -973,6 +1020,18 @@ Consequences that matter for an app:
   「錯位更新」, "misalignment update", turned up on a site robot). Expect
   small, coherent offsets after any re-scan; only a large or rotated
   discrepancy means a fresh map.
+  **Exception — firmware < 3.17.5**: an update could also rotate the
+  *headings* of locations and furniture (fixed in 3.17.5). On those robots a
+  rotated anchor after an update may be that bug, not a fresh map — compare
+  positions and headings separately before invalidating geometry.
+- **Update and Extend are Pro features** (Update: firmware ≥ 3.13.4; Extend:
+  ≥ 3.6.6). Both must start with the robot precisely docked on the
+  **original** charging dock — never an added dock. Update only re-scans
+  mapped areas; Extend only adds unscanned ones.
+- **Create map has a "keep current layout" variant** (2.2.10+; also carries
+  shortcuts and routines since 2.3.8) that re-applies furniture, destinations
+  and no-entry areas to a fresh scan. Whether the world frame survives is
+  unverified — run the reconcile routine below and let the anchors decide.
 - **The PNG origin moves whenever the map grows** — `origin_x/origin_y`
   describe the bottom-left pixel, and extending the map adds pixels. World
   coordinates of existing points do not move. Always redo world↔pixel math
@@ -1184,6 +1243,7 @@ stopped it.
 | Abort a running command (the usual case) | `cmds.cancel_command()` | Command ends with error `10001`, robot stops | Immediately — accepts new commands |
 | Stop manual velocity driving | `cmds.stop_manual_drive()` | Zeroes velocity, leaves manual mode | Immediately |
 | Latched hardware pause | `cmds.set_emergency_stop()` | Robot pauses, raises active error `21051` | **Only by physically pressing the power button** |
+| Detect the physical e-stop button (Pro e-stop model, firmware ≥ 3.18.1) | `queries.get_errors()` (expected) | Vendor says the button state is exposed as error `21057` — presumably in `get_errors()`, which `is_ready()` would report as `unknown` / `manual_check` | Unverified — observe on the robot |
 
 **`stop_manual_drive()` does not stop autonomous navigation.** Measured on
 BKP40HD1T (firmware 3.17.8, 2026-08-13): called 2.6 s into a `move_to_location`,
@@ -1250,10 +1310,25 @@ the API are often faster — an agent should suggest them:
    re-localization. The wake-word phrase is Japanese and must be spoken as-is.
 2. **Physical reset**: if re-localization keeps failing, push the robot back
    onto its charging dock (wheels on the floor — never lift it) and let it sit
-   for about a minute.
+   for about a minute. **Firmware ≥ 3.18.1** only re-aligns against a
+   registered dock within ~3 m of the *estimated* pose — a pose further off
+   stays wrong after docking, so seed it with `set_robot_pose()` instead.
 
-If localization drifts repeatedly at the same spots, that is what Pro
-self-localization markers are for — see the app-settings section below.
+The daily auto-restart (default 04:00–04:10; time configurable on Pro since
+3.16.1) resets the pose to the charging dock when it happens off the dock —
+a morning-after localization mismatch is expected; recover the same way.
+
+If localization drifts repeatedly at the same spots (Pro):
+
+- **Self-localization markers** (3.9.5+): printed IDs 1–50 at exactly 100 %
+  scale, label at the bottom, within 14 cm of the floor, ~5 m apart, never two
+  with the same ID, not in featureless corridors. They correct the pose only
+  while driving; more reliable since 3.15.1.
+- **Environment Change Ignore Area** (3.17.5+): laser points inside the drawn
+  area are excluded from localization (obstacle avoidance still sees them).
+  Draw it around the object that moved since mapping — not the route or the
+  spot where the pose jumped — and never let it hide more than ~50 % of the
+  laser points visible from any point on the route.
 
 ## Advising Users on App Settings
 
@@ -1267,7 +1342,7 @@ Only two knobs can be changed directly over the public API — everything else
 below is advice for the human:
 
 ```python
-cmds.set_speaker_volume(5)      # 0–10 (Pro can go higher); out-of-range → 13302
+cmds.set_speaker_volume(5)      # 0–10, clamped in code — Pro's higher ceiling (3.3.7+) is not reachable yet
 cmds.set_auto_homing(True)      # auto-return to charger on/off (readable too)
 ```
 
@@ -1285,11 +1360,20 @@ cmds.set_auto_homing(True)      # auto-return to charger on/off (readable too)
 | Solo robot dives under tables/chairs and snags | **Protruded obstacle height**（本體單獨行駛偵測高度）— default 0.30 m, min 0.13 m | Set to the local furniture leg height |
 | Frequent pauses with `21052`/`10108`/`10106`/`21308` (step detected) on genuinely flat floor | **Step detection**（段差偵測）| Only then consider disabling — **never** where real steps/stairs exist; fence those with no-entry zones instead |
 | Gives up in front of narrow passages that are actually passable / conversely hugs edges and snags | **Movement caution level**（移動謹慎度）— default 普通 | Bolder ↔ more cautious. It changes path planning only; physics still limits minimum width |
-| "Too fast for this crowded site" / "too slow" | **Moving speed**（移動速度）1–4, default 4 | Global slider; per-corridor speed needs Pro speed zones instead |
+| "Too fast for this crowded site" / "too slow" | **Moving speed**（移動速度）1–4, default 4 | Global slider; per-corridor speed needs Pro speed zones (3.8.5+, Map tab → + → speed zone) instead |
 | A specific heavy/tall shelf wobbles on start | **Shelf 緩慢起步** — per-shelf, app 家具編輯 | Readable first: `list_shelves()[…]["speed_mode"]` — if `NORMAL`, suggest switching that shelf to LOW |
 | Shelf placed at a spot is not flush with the wall behind it | **家具擺放方式 → 靠牆對齊** per destination | Readable first: `list_locations()[…]["undock_aligning_to_wall"]` |
-| Long carries get cancelled mid-route with nothing blocking (Pro) | **Max time to destination** — default 300 s | Lengthen; or shorten to fail fast. If it keeps failing, suspect blocked paths or localization drift first |
+| Long carries get cancelled mid-route with nothing blocking (Pro) | **Max time to destination** — default 300 s, range 10–1800 s (3.9.5+, Advanced settings) | Lengthen; or shorten to fail fast. If it keeps failing, suspect blocked paths or localization drift first |
 | Robot on a gentle slope creeps when stopped (Pro) | **Brake during stop**（停止時煞車）— on by default | Keep on for any sloped site; off only for flat sites where humans push the robot around |
+| Robot slides, zig-zags or pauses on a ramp (Pro) | **Slope area** map zone (3.10.6+) | Cover the ramp plus ~1.5 m of flat floor at each end; map the ramp with **Brake during stop** on; never put a furniture home or destination on it. Pausing on a slope releases the brakes — hold the robot first |
+| API move takes an unexpected path, or stops at an obstacle and waits instead of going around (Pro) | **Route specification** — designated lines / inter-location routes (3.6.6+), obstacle-detour toggle (3.8.5+), Beta "travel along inter-point routes for all movements" (3.14.4+) | Check the map's routes before blaming the planner. Detour on = go around, off = stop and wait; it always stops for people; moves under 1 m ignore routes |
+| `return_home()` while carrying a shelf keeps failing to dock (Pro) | **Charging readjustment when carrying furniture** (3.18.1+) | Turn on — it backs up and retries a misaligned approach. Needs extra clear space in front of the dock; charging takes longer |
+| After a power outage the robot starts charging just because it sits near the dock (Pro) | **Auto-charging near the dock**, under Auto return to charger (3.16.1+) | Turn off where an unplanned charge start is unwanted |
+| Robot auto-returns to the original dock, never the nearer added one (Pro) | **Multiple charging docks** (3.6.6+) | Expected. To charge at an added dock, command a move to that dock's destination |
+| Robot won't put a shelf away under a counter or another shelf | **Furniture height**, per furniture (2.0+) | Set it; furniture is only placed where the clearance is at least that height |
+| Robot slows down whenever it carries furniture | **Reduce max speed when carrying furniture**, furniture setting (3.4.7+) | Turn off to drive at the same speed loaded or empty |
+| Cargo overhanging the base is treated as an obstacle (Pro) | **Cargo size** width / depth / height (3.1.10+) | Enter the real cargo dimensions |
+| Arrival pose looser than expected | **Skip position and orientation adjustment** (2.1+) | Turn off where arrival precision matters |
 
 ### Rules for giving this advice
 
@@ -1382,7 +1466,7 @@ The underlying `kachaka-api` SDK (>= 3.17, pinned by this toolkit) provides:
 
 - **Sync client**: `kachaka_api.KachakaApiClient(target)`
 - **Async client**: `kachaka_api.aio.KachakaApiClient(target)`
-- **71 methods** covering movement, shelf ops, camera, map, LIDAR, IMU, etc.
+- **69 public methods** (kachaka-api 3.18.1) covering movement, shelf ops, camera, map, LIDAR, IMU, etc.
 - **Resolver**: Auto-maps shelf/location names to IDs
 - **Proto types**: `pb2.Result`, `pb2.Pose`, `pb2.Command`, etc.
 
@@ -1404,9 +1488,14 @@ Commands travel through a container-internal virtual network (`100.94.1.1:26400`
 **never touching WiFi**. The robot can walk into a zero-connectivity zone and
 keep executing the full route autonomously.
 
-```
-Normal mode:  [Your PC] ──WiFi──► [Robot gRPC]    ← WiFi断 = 機器人停止
-Playground:   [Robot Container] ──internal──► [Robot gRPC]  ← 完全不需WiFi
+```mermaid
+graph LR
+    subgraph normal["Normal mode — WiFi drop stops commands"]
+        PC["Your PC"] -->|"WiFi → :26400"| R1["Robot gRPC"]
+    end
+    subgraph pg["Playground — no WiFi needed"]
+        RC["Robot Container"] -->|"internal 100.94.1.1:26400"| R2["Robot gRPC"]
+    end
 ```
 
 ### When to Use Playground (vs. kachaka_core)
@@ -1464,6 +1553,8 @@ Before using `playground_*` MCP tools, set up SSH key auth:
 
 > The MCP tools auto-detect SSH keys (agent → `~/.ssh/id_ed25519` → `~/.ssh/id_rsa`). No need to specify the key path.
 
+> :warning: On firmware < 3.17.8 JupyterLab may fail to start in Playground. If `:26501` does not come up, check `conn.version` before debugging the network or the password.
+
 ### Container Environment Constraints
 
 When generating scripts for Playground, follow these rules:
@@ -1476,7 +1567,8 @@ When generating scripts for Playground, follow these rules:
 | Blocking | All move commands block by default (`wait_for_completion=True`) |
 | Script path | `/home/kachaka/<filename>` |
 | Log path | `/tmp/<filename>.log` |
-| Firmware | Updates may wipe `/home/kachaka/` — scripts need re-upload |
+| Firmware | Auto-update is on by default (3.4.7+: download overnight, install early morning) and may wipe `/home/kachaka/` — re-check `conn.version`, re-upload scripts |
+| Daily restart | Default 04:00–04:10 (Pro can set the time since 3.16.1); relaunch daemons from `/home/kachaka/kachaka_startup.sh`. On Pro < 3.18.1 an update could fail after its restart on sites without internet |
 
 > :x: **NEVER**: Use `kachaka_core` inside Playground scripts — it's not installed in the container
 > :x: **NEVER**: Forget `client.update_resolver()` — names sent as raw IDs cause error_code 10250

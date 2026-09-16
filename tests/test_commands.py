@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 import grpc
 import pytest
 
+from kachaka_api.generated import kachaka_api_pb2 as pb2
+
 from kachaka_core.commands import KachakaCommands
 from kachaka_core.connection import KachakaConnection
 
@@ -112,6 +114,34 @@ class TestMovement:
         assert result["action"] == "return_home"
         req = mock_stub.StartCommand.call_args[0][0]
         assert req.command.HasField("return_home_command")
+
+    @pytest.mark.skipif(
+        not hasattr(pb2, "DepartFromChargerCommand"), reason="needs kachaka-api>=3.18.1",
+    )
+    def test_depart_from_charger(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
+
+        result = KachakaCommands(conn).depart_from_charger()
+
+        assert result["ok"] is True
+        assert result["action"] == "depart_from_charger"
+        assert result["command_id"] == "cmd-1"
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.HasField("depart_from_charger_command")
+
+    def test_depart_from_charger_without_stubs(self, monkeypatch):
+        monkeypatch.delattr(pb2, "DepartFromChargerCommand", raising=False)
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = _wire_start_command(mock_client)
+
+        result = KachakaCommands(conn).depart_from_charger()
+
+        assert result["ok"] is False
+        assert "3.18.1" in result["error"]
+        mock_stub.StartCommand.assert_not_called()
 
 
 class TestShelfOps:
@@ -393,6 +423,34 @@ class TestSwitchMap:
             pose={"x": 1.0, "y": 2.0, "theta": 0.5},
             inherit_docking_state_and_docked_shelf=False,
         )
+
+    def test_switch_map_inherit_method(self):
+        mock_client = MagicMock()
+        mock_client.switch_map.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).switch_map(
+            "map-456", inherit_docking_state=True,
+            docking_state_inherit_method="fiducial_id_based",
+        )
+        assert result["ok"] is True
+        mock_client.switch_map.assert_called_once_with(
+            "map-456",
+            pose=None,
+            inherit_docking_state_and_docked_shelf=True,
+            docking_state_inherit_method=pb2.SWITCH_MAP_INHERIT_METHOD_FIDUCIAL_ID_BASED,
+        )
+
+    def test_switch_map_unknown_inherit_method(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).switch_map(
+            "map-456", docking_state_inherit_method="by_magic",
+        )
+        assert result["ok"] is False
+        assert "by_magic" in result["error"]
+        mock_client.switch_map.assert_not_called()
 
     def test_switch_map_failure(self):
         mock_client = MagicMock()

@@ -26,6 +26,12 @@ from .error_handling import with_retry
 
 logger = logging.getLogger(__name__)
 
+_SWITCH_MAP_INHERIT_METHODS = {
+    "unspecified": pb2.SWITCH_MAP_INHERIT_METHOD_UNSPECIFIED,
+    "shelf_id_based": pb2.SWITCH_MAP_INHERIT_METHOD_SHELF_ID_BASED,
+    "fiducial_id_based": pb2.SWITCH_MAP_INHERIT_METHOD_FIDUCIAL_ID_BASED,
+}
+
 
 class KachakaCommands:
     """High-level command interface for a single Kachaka robot.
@@ -208,9 +214,11 @@ class KachakaCommands:
     ) -> dict:
         """Move forward (positive) or backward (negative) by *distance_meter*.
 
-        ``speed`` is the absolute travel speed in m/s, range (0, 0.3]. The
-        firmware rejects ``speed=0.0`` with error 15508 (invalid parameter)
-        on 3.16+, so the default is ``0.1`` m/s.
+        ``speed`` is the absolute travel speed in m/s, range (0, 0.3]. Firmware
+        3.16 rejects ``speed=0.0`` with error 15508 (invalid parameter; the
+        vendor fixed the no-speed error in 3.17.5), so the default is
+        ``0.1`` m/s. Firmware before 3.18.1 may rotate at the end of the
+        move — re-read the heading if it matters.
 
         Args:
             mute_sensors: When True (kachaka-api 3.16.1+), bypass safety
@@ -293,6 +301,36 @@ class KachakaCommands:
             wait_for_completion=False,
         )
         return self._result_to_dict(result, action="return_home", command_id=cid)
+
+    @with_retry()
+    def depart_from_charger(
+        self,
+        *,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Drive slightly forward to leave the charging dock.
+
+        kachaka-api 3.18.1+ / firmware 3.18.1+. Does nothing when the robot
+        is not on the dock. Fire-and-accept like other commands — drive
+        completion with ``poll_until_complete()``.
+        """
+        if not hasattr(pb2, "DepartFromChargerCommand"):
+            return {
+                "ok": False,
+                "action": "depart_from_charger",
+                "error": "requires kachaka-api>=3.18.1 (installed stubs lack DepartFromChargerCommand)",
+            }
+        cmd = pb2.Command(depart_from_charger_command=pb2.DepartFromChargerCommand())
+        result, cid = self._start_command_advanced(
+            cmd,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+            wait_for_completion=False,
+        )
+        return self._result_to_dict(result, action="depart_from_charger", command_id=cid)
 
     # ── Shelf operations ─────────────────────────────────────────────
 
@@ -534,7 +572,8 @@ class KachakaCommands:
     def export_map(self, map_id: str, output_path: str) -> dict:
         """Export a map to a binary file (Kachaka proprietary format).
 
-        The exported file can be re-imported with ``import_map``.
+        The exported file can be re-imported with ``import_map``. Export can
+        fail with 12117 while the robot is moving — dock it and retry.
         """
         try:
             result = self.sdk.export_map(map_id, output_path)
@@ -579,6 +618,9 @@ class KachakaCommands:
         chunk_size: int = 1024 * 1024,
     ) -> dict:
         """Import a PNG occupancy grid image as a new map (ROS-style).
+
+        Firmware 3.14.4+; the vendor note describes the output as a Kachaka
+        Pro map.
 
         Args:
             image_path: Path to a grayscale PNG file (ROS occupancy grid format).
@@ -629,20 +671,40 @@ class KachakaCommands:
         pose_y: Optional[float] = None,
         pose_theta: Optional[float] = None,
         inherit_docking_state: bool = False,
+        docking_state_inherit_method: str = "unspecified",
     ) -> dict:
         """Switch to a different map.
 
         Optionally specify an initial pose ``(pose_x, pose_y, pose_theta)``.
         When no pose is given, the charger pose of the target map is used.
+
+        ``inherit_docking_state`` (Kachaka Pro only) keeps the docked shelf
+        across the switch. ``docking_state_inherit_method`` selects how the
+        shelf is matched on the new map: ``"unspecified"`` (firmware
+        default), ``"shelf_id_based"`` or ``"fiducial_id_based"``
+        (kachaka-api 3.18.1+; the proto field exists since 3.17).
         """
         try:
+            method = _SWITCH_MAP_INHERIT_METHODS.get(docking_state_inherit_method)
+            if method is None:
+                return {
+                    "ok": False,
+                    "error": f"unknown docking_state_inherit_method: {docking_state_inherit_method!r} "
+                    f"(expected one of {sorted(_SWITCH_MAP_INHERIT_METHODS)})",
+                    "action": "switch_map",
+                }
             pose = None
             if pose_x is not None and pose_y is not None:
                 pose = {"x": pose_x, "y": pose_y, "theta": pose_theta or 0.0}
+            # Only pass the keyword when set: kachaka-api < 3.18.1 rejects it.
+            extra = {}
+            if method != pb2.SWITCH_MAP_INHERIT_METHOD_UNSPECIFIED:
+                extra["docking_state_inherit_method"] = method
             result = self.sdk.switch_map(
                 map_id,
                 pose=pose,
                 inherit_docking_state_and_docked_shelf=inherit_docking_state,
+                **extra,
             )
             d = self._result_to_dict(result, action="switch_map", target=map_id)
             if d["ok"]:
@@ -964,6 +1026,8 @@ class KachakaCommands:
 
         Returns immediately after the RPC is acknowledged. Callers should
         wait for ``ping()`` to succeed again before issuing further commands.
+        On firmware before 3.17.10 the first move after a restart with a
+        shelf docked may fail — retry it once.
         """
         try:
             result = self.sdk.restart_robot()
