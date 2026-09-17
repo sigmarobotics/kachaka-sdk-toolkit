@@ -496,6 +496,8 @@ stop heading follows the destination furniture's orientation. The destination's
 
 The full symptom → app-setting recommendation table lives in **"Advising Users
 on App Settings"** below.
+Every app screen, with its exact zh-TW labels, is mapped in
+[`references/app-ui-screens.md`](references/app-ui-screens.md).
 
 ### Shelf-operation error codes
 
@@ -1350,19 +1352,19 @@ cmds.set_auto_homing(True)      # auto-return to charger on/off (readable too)
 
 | Symptom seen from the API / on site | Setting (app path) | Recommend |
 |---|---|---|
-| `10270`/`10271` — undock/put-away always refused, near-instantly | **Keep hold furniture**（家具持續結合）— 詳細設定 → 家具一體化模式 | Turn **off** unless the deployment intends the robot to permanently keep its shelf. Verified live: while on, there is **no API path to put the shelf down** |
-| `11019`/`11501` — "cannot be charged with a furniture on it" | **Charge while holding furniture**（帶著家具充電）same screen | Turn **on** if the robot should dock to charge without dropping its shelf |
+| `10270`/`10271` — undock/put-away always refused, near-instantly | **Keep hold furniture**（持續搬著家具）— 進階設定 → 家具一體化模式 | Turn **off** unless the deployment intends the robot to permanently keep its shelf. Verified live: while on, there is **no API path to put the shelf down** |
+| `11019`/`11501` — "cannot be charged with a furniture on it" | **Charge while holding furniture**（搬著家具充電）same screen | Turn **on** if the robot should dock to charge without dropping its shelf |
 | Robot finishes a delivery and just sits there, shelf still mounted, battery draining | **Auto return to charger (with furniture)**（自動返回充電座・載家具時）| Enable and set the idle-seconds timer. Requires furniture-integration mode; without it the timeout behaviour is "put the shelf down here" instead |
 | Robot idles in a walkway before returning to charge (or returns too eagerly) | **Auto return to charger (no furniture)** — default 30 s | Adjust the idle timer either way |
 | Robot refuses a carpeted corridor and detours | **No carpet entry**（禁止進入地毯）— on by default | If the carpet is safe to cross, turn off; if it must be avoided, keep on |
 | Robot stalls on patterned floor / material transitions for no visible reason | **Floor obstacle detection**（地面障礙物偵測）misfiring | Prefer marking that floor as an enterable zone on the map; disabling the whole detector is the blunt fallback |
-| While carrying furniture it hits table tops / protruding edges | **Protruded obstacle detection**（凸出障礙物偵測・搬運時）| Should be on — check it was not disabled |
-| Solo robot dives under tables/chairs and snags | **Protruded obstacle height**（本體單獨行駛偵測高度）— default 0.30 m, min 0.13 m | Set to the local furniture leg height |
-| Frequent pauses with `21052`/`10108`/`10106`/`21308` (step detected) on genuinely flat floor | **Step detection**（段差偵測）| Only then consider disabling — **never** where real steps/stairs exist; fence those with no-entry zones instead |
+| While carrying furniture it hits table tops / protruding edges | **Protruded obstacle detection**（突出障礙物偵測）— 安心功能 | Should be on — check it was not disabled |
+| Solo robot dives under tables/chairs and snags | **Protruded obstacle height**（僅本體行駛時的偵測高度）— default 0.30 m, min 0.13 m | Set to the local furniture leg height |
+| Frequent pauses with `21052`/`10108`/`10106`/`21308` (step detected) on genuinely flat floor | **Step detection**（階差偵測）| Only then consider disabling — **never** where real steps/stairs exist; fence those with no-entry zones instead |
 | Gives up in front of narrow passages that are actually passable / conversely hugs edges and snags | **Movement caution level**（移動謹慎度）— default 普通 | Bolder ↔ more cautious. It changes path planning only; physics still limits minimum width |
 | "Too fast for this crowded site" / "too slow" | **Moving speed**（移動速度）1–4, default 4 | Global slider; per-corridor speed needs Pro speed zones (3.8.5+, Map tab → + → speed zone) instead |
-| A specific heavy/tall shelf wobbles on start | **Shelf 緩慢起步** — per-shelf, app 家具編輯 | Readable first: `list_shelves()[…]["speed_mode"]` — if `NORMAL`, suggest switching that shelf to LOW |
-| Shelf placed at a spot is not flush with the wall behind it | **家具擺放方式 → 靠牆對齊** per destination | Readable first: `list_locations()[…]["undock_aligning_to_wall"]` |
+| A specific heavy/tall shelf wobbles on start | **平順起步** — per-shelf, 編輯家具 | Turn on for that shelf (app only — it is a separate toggle, not `speed_mode`). The 家具搬運速度 slider (`list_shelves()[…]["speed_mode"]`) is the other lever |
+| Shelf placed at a spot is not flush with the wall behind it | **家具擺放方式 → 依照牆面方向擺放家具** per destination | Readable first: `list_locations()[…]["undock_aligning_to_wall"]` |
 | Long carries get cancelled mid-route with nothing blocking (Pro) | **Max time to destination** — default 300 s, range 10–1800 s (3.9.5+, Advanced settings) | Lengthen; or shorten to fail fast. If it keeps failing, suspect blocked paths or localization drift first |
 | Robot on a gentle slope creeps when stopped (Pro) | **Brake during stop**（停止時煞車）— on by default | Keep on for any sloped site; off only for flat sites where humans push the robot around |
 | Robot slides, zig-zags or pauses on a ramp (Pro) | **Slope area** map zone (3.10.6+) | Cover the ramp plus ~1.5 m of flat floor at each end; map the ramp with **Brake during stop** on; never put a furniture home or destination on it. Pausing on a slope releases the brakes — hold the robot first |
