@@ -652,3 +652,205 @@ class TestSounds:
         result = KachakaQueries(conn).list_sounds()
         assert result["ok"] is True
         assert result["sounds"] == []
+
+
+# ── Configuration fingerprint ────────────────────────────────────────
+
+
+def _make_conn_named(mock_client, target):
+    with patch("kachaka_core.connection.KachakaApiClient", return_value=mock_client):
+        return KachakaConnection.get(target)
+
+
+def _fingerprint_conn(
+    *,
+    target: str = "test-robot",
+    volume: int = 7,
+    auto_homing: bool = True,
+    reversed_entries: bool = False,
+    shelf_a_speed_mode: int = 2,  # pb2.ShelfSpeedMode SHELF_SPEED_MODE_NORMAL
+):
+    """A conn whose mock client answers every fingerprint RPC."""
+    mock = MagicMock()
+    mock.get_robot_serial_number.return_value = "SN-0001"
+    mock.get_robot_version.return_value = "3.17.5"
+    mock.get_current_map_id.return_value = "map-1"
+    m1, m2 = MagicMock(), MagicMock()
+    m1.id, m1.name = "map-1", "1F Office"
+    m2.id, m2.name = "map-2", "2F Lab"
+    mock.get_map_list.return_value = [m1, m2]
+    mock.get_auto_homing_enabled.return_value = auto_homing
+    mock.get_manual_control_enabled.return_value = False
+    mock.get_speaker_volume.return_value = volume
+
+    kitchen, dock = MagicMock(), MagicMock()
+    kitchen.name = "Kitchen"
+    kitchen.undock_shelf_aligning_to_wall = True
+    kitchen.undock_shelf_avoiding_obstacles = False
+    kitchen.ignore_voice_recognition = True
+    dock.name = "Dock"
+    dock.undock_shelf_aligning_to_wall = False
+    dock.undock_shelf_avoiding_obstacles = True
+    dock.ignore_voice_recognition = False
+    mock.get_locations.return_value = [kitchen, dock]
+
+    shelf_a, shelf_b = MagicMock(), MagicMock()
+    shelf_a.name = "Shelf A"
+    shelf_a.speed_mode = shelf_a_speed_mode
+    shelf_a.ignore_voice_recognition = False
+    shelf_b.name = "Shelf B"
+    shelf_b.speed_mode = 1  # SHELF_SPEED_MODE_LOW
+    shelf_b.ignore_voice_recognition = True
+    mock.get_shelves.return_value = [shelf_a, shelf_b]
+
+    conn = _make_conn_named(mock, target)
+
+    # Re-assign stub after _make_conn_named (which replaces it with a real one)
+    mock_stub = MagicMock()
+    ld1, ld2 = MagicMock(), MagicMock()
+    ld1.id, ld1.name, ld1.type = "loc-1", "Kitchen", 3
+    ld2.id, ld2.name, ld2.type = "loc-2", "Dock", 1
+    loc_resp = MagicMock()
+    loc_resp.locations = [ld2, ld1] if reversed_entries else [ld1, ld2]
+    mock_stub.GetLocationsDigest.return_value = loc_resp
+    sd1, sd2 = MagicMock(), MagicMock()
+    sd1.id, sd1.name = "shelf-1", "Shelf A"
+    sd2.id, sd2.name = "shelf-2", "Shelf B"
+    shelf_resp = MagicMock()
+    shelf_resp.shelves = [sd2, sd1] if reversed_entries else [sd1, sd2]
+    mock_stub.GetShelvesDigest.return_value = shelf_resp
+    mock.stub = mock_stub
+
+    return conn, mock
+
+
+class TestFingerprint:
+    def test_full_fingerprint(self):
+        conn, _ = _fingerprint_conn()
+
+        result = KachakaQueries(conn).fingerprint()
+
+        assert result["ok"] is True
+        assert result["partial"] == []
+        fp = result["fingerprint"]
+        assert fp["serial"] == "SN-0001"
+        assert fp["fw"] == "3.17.5"
+        assert fp["map_id"] == "map-1"
+        assert fp["map_name"] == "1F Office"
+        assert fp["auto_homing"] is True
+        assert fp["manual_control"] is False
+        assert fp["speaker_volume"] == 7
+        assert fp["location_flags"] == {
+            "Kitchen": {
+                "undock_shelf_aligning_to_wall": True,
+                "undock_shelf_avoiding_obstacles": False,
+                "ignore_voice_recognition": True,
+            },
+            "Dock": {
+                "undock_shelf_aligning_to_wall": False,
+                "undock_shelf_avoiding_obstacles": True,
+                "ignore_voice_recognition": False,
+            },
+        }
+        assert fp["shelf_flags"] == {
+            "Shelf A": {
+                "speed_mode": "SHELF_SPEED_MODE_NORMAL",
+                "ignore_voice_recognition": False,
+            },
+            "Shelf B": {
+                "speed_mode": "SHELF_SPEED_MODE_LOW",
+                "ignore_voice_recognition": True,
+            },
+        }
+        assert len(fp["locations_digest"]) == 40
+        assert len(fp["shelves_digest"]) == 40
+        assert fp["locations_digest"] != fp["shelves_digest"]
+        assert len(result["digest"]) == 40
+
+    def test_single_rpc_failure_is_partial(self):
+        conn, mock = _fingerprint_conn()
+        mock.get_speaker_volume.side_effect = RuntimeError("UNAVAILABLE")
+
+        result = KachakaQueries(conn).fingerprint()
+
+        assert result["ok"] is True
+        assert result["partial"] == ["speaker_volume"]
+        assert result["fingerprint"]["speaker_volume"] is None
+        # Every other field still collected.
+        assert result["fingerprint"]["serial"] == "SN-0001"
+        assert result["fingerprint"]["location_flags"]["Kitchen"][
+            "ignore_voice_recognition"
+        ] is True
+        assert len(result["digest"]) == 40
+
+    def test_missing_map_marks_both_map_fields_partial(self):
+        conn, mock = _fingerprint_conn()
+        mock.get_current_map_id.return_value = ""
+
+        result = KachakaQueries(conn).fingerprint()
+
+        assert result["partial"] == ["map_id", "map_name"]
+        assert result["fingerprint"]["map_id"] is None
+        assert result["fingerprint"]["map_name"] is None
+
+    def test_digest_stable_for_same_input(self):
+        conn, _ = _fingerprint_conn()
+        queries = KachakaQueries(conn)
+
+        first = queries.fingerprint()
+        second = queries.fingerprint()
+
+        assert first["digest"] == second["digest"]
+        assert first["fingerprint"] == second["fingerprint"]
+
+        # Same configuration reported in a different order is the same config.
+        other_conn, _ = _fingerprint_conn(target="other-robot", reversed_entries=True)
+        assert KachakaQueries(other_conn).fingerprint()["digest"] == first["digest"]
+
+    def test_digest_changes_when_a_setting_changes(self):
+        conn, _ = _fingerprint_conn()
+        louder_conn, _ = _fingerprint_conn(target="louder-robot", volume=3)
+        homing_off_conn, _ = _fingerprint_conn(
+            target="homing-off-robot", auto_homing=False
+        )
+
+        baseline = KachakaQueries(conn).fingerprint()["digest"]
+        assert KachakaQueries(louder_conn).fingerprint()["digest"] != baseline
+        assert KachakaQueries(homing_off_conn).fingerprint()["digest"] != baseline
+
+    def test_shelf_speed_mode_moves_the_digest(self):
+        """The blind spot shelves_digest has: same id/name, slower every trip."""
+        conn, _ = _fingerprint_conn()
+        slow_conn, _ = _fingerprint_conn(
+            target="slow-shelf-robot", shelf_a_speed_mode=1  # SHELF_SPEED_MODE_LOW
+        )
+
+        baseline = KachakaQueries(conn).fingerprint()
+        slowed = KachakaQueries(slow_conn).fingerprint()
+
+        # shelves_digest is blind to it — only id/name are in ShelfDigest.
+        assert slowed["fingerprint"]["shelves_digest"] == (
+            baseline["fingerprint"]["shelves_digest"]
+        )
+        # shelf_flags is not, so the overall digest moves.
+        assert (
+            slowed["fingerprint"]["shelf_flags"]["Shelf A"]["speed_mode"]
+            == "SHELF_SPEED_MODE_LOW"
+        )
+        assert slowed["digest"] != baseline["digest"]
+
+    def test_get_shelves_failure_only_marks_shelf_flags_partial(self):
+        conn, mock = _fingerprint_conn()
+        mock.get_shelves.side_effect = RuntimeError("UNAVAILABLE")
+
+        result = KachakaQueries(conn).fingerprint()
+
+        assert result["ok"] is True
+        assert result["partial"] == ["shelf_flags"]
+        assert result["fingerprint"]["shelf_flags"] is None
+        # The digest RPC is a different call, so it survives.
+        assert len(result["fingerprint"]["shelves_digest"]) == 40
+        assert result["fingerprint"]["location_flags"]["Kitchen"][
+            "ignore_voice_recognition"
+        ] is True
+        assert len(result["digest"]) == 40

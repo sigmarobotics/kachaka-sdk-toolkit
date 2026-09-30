@@ -12,6 +12,8 @@ Patterns extracted from:
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import logging
 import math
 import time
@@ -549,4 +551,162 @@ class KachakaQueries:
         return {
             "ok": True,
             "sounds": [{"id": s.id, "name": s.name} for s in response.sounds],
+        }
+
+    # ── Configuration fingerprint ────────────────────────────────────
+
+    @staticmethod
+    def _canonical(obj) -> str:
+        """Stable JSON for hashing — sorted keys, no incidental whitespace."""
+        return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    @with_retry()
+    def fingerprint(self) -> dict:
+        """Snapshot of every robot-side setting that can change what a run does.
+
+        Verification runs are only comparable when they ran on the same
+        configuration. Call this alongside each result and store ``digest``:
+        two runs whose digests differ were *not* run under the same conditions,
+        no matter how similar the code was.
+
+        Sources verified against the locally installed **kachaka-api 3.17.5.0**
+        (``importlib.metadata.version("kachaka-api")``):
+
+        - ``serial`` / ``fw`` — ``conn.serial`` / ``conn.version``, the
+          connection's permanently cached values (``get_robot_serial_number``
+          base.py:69 -> ``str``; ``get_robot_version`` base.py:76 -> ``str``).
+          Both return ``""`` instead of raising when the fetch failed, so an
+          empty value is reported as ``None`` + ``partial``.
+        - ``map_id`` — ``get_current_map_id()`` base.py:639 -> ``str``. An empty
+          id (no map loaded) counts as unavailable, not as a value.
+        - ``map_name`` — matched out of ``get_map_list()`` base.py:634 ->
+          ``RepeatedCompositeContainer`` of map list entries (``.id``/``.name``);
+          unavailable whenever ``map_id`` is, or when no entry matches it.
+        - ``locations_digest`` / ``shelves_digest`` — sha1 over the
+          ``GetLocationsDigest`` / ``GetShelvesDigest`` RPCs, which are *not*
+          wrapped in base.py, so they go through ``self.sdk.stub`` exactly as
+          :meth:`list_locations_digest` does. Both return a **list**, not a
+          hash: ``GetLocationsDigestResponse{metadata, locations:
+          LocationDigest(id, name, type)}`` and
+          ``GetShelvesDigestResponse{metadata, shelves: ShelfDigest(id, name)}``
+          — the hashing is done here, over the entries sorted by id so that
+          server-side reordering does not look like a configuration change.
+        - ``auto_homing`` — ``get_auto_homing_enabled()`` base.py:590 -> ``bool``.
+        - ``manual_control`` — ``get_manual_control_enabled()`` base.py:604 ->
+          ``bool``.
+        - ``speaker_volume`` — ``get_speaker_volume()`` base.py:736 -> ``int``
+          (0–10).
+        - ``location_flags`` — raw ``get_locations()`` base.py:552 ->
+          ``RepeatedCompositeContainer`` of ``pb2.Location``. Deliberately NOT
+          :meth:`list_locations`, whose wrapper drops
+          ``ignore_voice_recognition`` (``pb2.Location`` field 7) and renames
+          the undock flags. The three keys are the proto names verified via
+          ``pb2.Location.DESCRIPTOR.fields``: ``undock_shelf_aligning_to_wall``
+          (5), ``undock_shelf_avoiding_obstacles`` (6),
+          ``ignore_voice_recognition`` (7).
+        - ``shelf_flags`` — raw ``get_shelves()`` base.py:564 ->
+          ``RepeatedCompositeContainer`` of ``pb2.Shelf``. These two fields are
+          the blind spot of ``shelves_digest``, which only hashes
+          ``ShelfDigest(id, name)``: a shelf switched to low speed keeps its id
+          and name, so the digest does not move even though every trip with it
+          now takes longer. Keys are the proto names verified via
+          ``pb2.Shelf.DESCRIPTOR.fields``: ``speed_mode`` (field 9, enum
+          ``pb2.ShelfSpeedMode``) and ``ignore_voice_recognition`` (field 10,
+          bool). ``speed_mode`` is stored as the **enum name**, not the number,
+          so a stored fingerprint stays readable:
+          ``pb2.ShelfSpeedMode.DESCRIPTOR.values`` are
+          ``SHELF_SPEED_MODE_UNSPECIFIED`` (0), ``SHELF_SPEED_MODE_LOW`` (1),
+          ``SHELF_SPEED_MODE_NORMAL`` (2).
+
+        A single failing RPC never sinks the whole fingerprint: that field is
+        set to ``None`` and its name is appended to ``partial``. ``partial`` is
+        always present and is ``[]`` on a clean read. A partial fingerprint
+        still gets a ``digest``, so two partial reads that failed on the same
+        fields and agree on the rest still compare equal.
+
+        Settings this CANNOT see are listed in
+        ``skills/kachaka-sdk/references/behavior-affecting-settings.md`` —
+        they have to be recorded by hand.
+        """
+        fp: dict = {}
+        partial: list[str] = []
+
+        def field(name: str, fetch):
+            try:
+                fp[name] = fetch()
+            except Exception as exc:
+                logger.debug("fingerprint: %s unavailable (%s)", name, exc)
+                fp[name] = None
+                partial.append(name)
+
+        def require(value, what: str):
+            """Turn an empty answer into the same 'unavailable' path as a raise."""
+            if not value:
+                raise RuntimeError(f"{what} came back empty")
+            return value
+
+        # conn.serial / conn.version swallow their own errors and hand back "".
+        field("serial", lambda: require(self.conn.serial, "serial"))
+        field("fw", lambda: require(self.conn.version, "version"))
+
+        field("map_id", lambda: require(self.sdk.get_current_map_id(), "map_id"))
+        field(
+            "map_name",
+            lambda: require(
+                next(
+                    (m.name for m in self.sdk.get_map_list() if m.id == fp["map_id"]),
+                    None,
+                ),
+                "map_name",
+            ),
+        )
+
+        field("locations_digest", self._locations_digest)
+        field("shelves_digest", self._shelves_digest)
+
+        field("auto_homing", self.sdk.get_auto_homing_enabled)
+        field("manual_control", self.sdk.get_manual_control_enabled)
+        field("speaker_volume", self.sdk.get_speaker_volume)
+
+        field("location_flags", self._location_flags)
+        field("shelf_flags", self._shelf_flags)
+
+        return {
+            "ok": True,
+            "fingerprint": fp,
+            "digest": hashlib.sha1(self._canonical(fp).encode()).hexdigest(),
+            "partial": partial,
+        }
+
+    def _locations_digest(self) -> str:
+        response = self.sdk.stub.GetLocationsDigest(pb2.GetRequest())
+        entries = sorted(
+            [loc.id, loc.name, str(loc.type)] for loc in response.locations
+        )
+        return hashlib.sha1(self._canonical(entries).encode()).hexdigest()
+
+    def _shelves_digest(self) -> str:
+        response = self.sdk.stub.GetShelvesDigest(pb2.GetRequest())
+        entries = sorted([s.id, s.name] for s in response.shelves)
+        return hashlib.sha1(self._canonical(entries).encode()).hexdigest()
+
+    def _location_flags(self) -> dict:
+        return {
+            loc.name: {
+                "undock_shelf_aligning_to_wall": bool(loc.undock_shelf_aligning_to_wall),
+                "undock_shelf_avoiding_obstacles": bool(
+                    loc.undock_shelf_avoiding_obstacles
+                ),
+                "ignore_voice_recognition": bool(loc.ignore_voice_recognition),
+            }
+            for loc in self.sdk.get_locations()
+        }
+
+    def _shelf_flags(self) -> dict:
+        return {
+            shelf.name: {
+                "speed_mode": pb2.ShelfSpeedMode.Name(shelf.speed_mode),
+                "ignore_voice_recognition": bool(shelf.ignore_voice_recognition),
+            }
+            for shelf in self.sdk.get_shelves()
         }
