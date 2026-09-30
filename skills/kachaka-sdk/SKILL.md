@@ -315,6 +315,8 @@ cmds.dock_shelf()                 # engage the shelf in front of the robot
 cmds.undock_shelf()               # set the carried shelf down here
 ```
 
+> :warning: **Field-measured on 3.18.1** (see [`references/command-semantics-field-3.18.1.md`](references/command-semantics-field-3.18.1.md)): `move_shelf()` does **not** set the shelf down at the destination — the robot stays docked until `undock_shelf()`/`return_shelf()`. And `return_shelf()` while *not* holding the shelf is not a no-op: the robot drives to the shelf, docks it and returns it home. Check `get_moving_shelf_id()` before a "just in case" `return_shelf()`.
+
 ### How docking physically works
 
 The robot drives **underneath** the shelf; a motor-driven catch then springs up
@@ -498,6 +500,9 @@ The full symptom → app-setting recommendation table lives in **"Advising Users
 on App Settings"** below.
 Every app screen, with its exact zh-TW labels, is mapped in
 [`references/app-ui-screens.md`](references/app-ui-screens.md).
+Which settings change what the robot does (the `fingerprint()` field list) and
+which ones no RPC can read back (safety/obstacle settings, docking, speed caps)
+are in [`references/behavior-affecting-settings.md`](references/behavior-affecting-settings.md).
 
 ### Shelf-operation error codes
 
@@ -587,6 +592,7 @@ queries.list_shelves()      # {"ok": True, "shelves": [{name, id, home_location_
 queries.get_moving_shelf()  # {"ok": True, "shelf_id": "..." or null}
 queries.get_command_state() # {"ok": True, "state": "...", "is_running": false}
 queries.get_errors()        # {"ok": True, "errors": []}
+queries.fingerprint()       # {"ok": True, "fingerprint": {serial, fw, map_id, locations_digest, shelf/location flags, ...}, "digest": "sha1", "partial": []}
 ```
 
 ## Camera
@@ -807,7 +813,7 @@ cmds.restart_robot()               # reboot; clears Fatal-class codes (e.g. 2100
 ### Racing condition behavior (tested on real robot)
 
 - `_execute_command` is **not thread-safe** — serialise command calls from the caller side
-- **Command B cancels A**: A receives `error_code=10001` (interrupted), B completes normally
+- **Command B cancels A**: A ends with `error_code=10001` (interrupted), B completes normally — but A's 10001 is **not reliably published** on the result stream (3/11 on 3.18.1), and `get_history_list()` marks even *successful* commands 10001 when the next command follows immediately. Details and the retarget cost (a 1–2 s brake, `cancel_all=False` merely queues) in [`references/command-semantics-field-3.18.1.md`](references/command-semantics-field-3.18.1.md)
 - **Command B may not be yours**: app Routines (time / voice / multi-function-button triggers), shortcuts and the Kachaka Button all command the same robot. Before debugging an unexplained cancel, find out what else drives this robot
 - **Concurrent commands**: One wins, the other gets TIMEOUT (its command_id never appears in GetLastCommandResult)
 - **Short timeout + new command**: Robot keeps moving after controller timeout; `cancel_all=True` (default) on the new command cancels the residual movement
@@ -843,7 +849,7 @@ Measured timeline after a **silent** drop (real robot, firmware 3.16.x):
 - `metrics` is not a snapshot — read after command execution, not concurrently
 - `state` property returns a thread-safe `copy.copy()` snapshot
 - Background thread is a daemon — auto-exits when the process ends
-- Kachaka's `GetCommandState` returns `PENDING` + empty `command_id` after command completion (idle state), so completion is detected via `command_id` change, not state transition alone
+- Kachaka's `GetCommandState` returns `PENDING` + empty `command_id` after command completion (idle state), so completion is detected via `command_id` change, not state transition alone — and **busy must be tested as `RUNNING`, or `PENDING` with a non-empty command**; `state != UNSPECIFIED` calls an idle robot busy (caught on-robot 2026-09-23)
 
 ## Camera Streaming (Best Practice)
 
