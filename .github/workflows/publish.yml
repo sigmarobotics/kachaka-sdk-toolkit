@@ -26,11 +26,13 @@ jobs:
             local version="${GITHUB_REF_NAME#v}"
             jq --arg v "$version" '.plugins[0].version = $v' .claude-plugin/marketplace.json > tmp.json
             mv tmp.json .claude-plugin/marketplace.json
+            jq --arg v "$version" '.version = $v' .claude-plugin/plugin.json > tmp.json
+            mv tmp.json .claude-plugin/plugin.json
             sed -i "s/^version = .*/version = $version/" setup.cfg
             sed -i "s/^fallback_version = .*/fallback_version = \"$version\"/" pyproject.toml
           }
           commit_and_push() {
-            git add .claude-plugin/marketplace.json setup.cfg pyproject.toml
+            git add .claude-plugin/marketplace.json .claude-plugin/plugin.json setup.cfg pyproject.toml
             git diff --cached --quiet || git commit -m "chore: sync versions to ${GITHUB_REF_NAME}"
             git push origin HEAD:master
           }

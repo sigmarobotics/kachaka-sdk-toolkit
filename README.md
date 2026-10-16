@@ -877,23 +877,27 @@ The controller tools expose `RobotController` through the MCP server, providing 
 
 #### Playground (5 tools)
 
-Manage scripts running inside the robot's on-board Docker container — see the Playground Offline Execution section below.
+Manage scripts running inside the robot's on-board Docker container (offline mode / 離線模式) — see the Playground Offline Execution section below. All five tools go through JupyterLab :26501 by default (factory password `kachaka`, no setup) and take a `transport` parameter: `"auto"` (default — JupyterLab first, SSH :26500 only when `:26501` is unreachable), `"jupyter"`, or `"ssh"`.
 
 | Tool | Description |
 |------|-------------|
-| `playground_upload` | Upload a Python script to the robot via SSH (port 26500) |
-| `playground_run` | Run an uploaded script in the background, capturing stdout/stderr to `/tmp/<filename>.log` |
-| `playground_stop` | Stop a running script |
+| `playground_upload` | Upload a Python script to `/home/kachaka/<filename>` in the container (JupyterLab by default, no SSH key required) |
+| `playground_run` | Run an uploaded script in the background, capturing stdout/stderr to `log_path` (default `/tmp/script.log`) |
+| `playground_stop` | Stop a running script (pass `filename=`) |
 | `playground_log` | Tail the script's log file |
-| `playground_status` | Check whether a script is still running |
+| `playground_status` | Check whether a script is still running (pass `filename=`) |
 
 ## Playground Offline Execution
+
+> 俗稱「離線模式」／offline mode／Playground 執行——三者同義。程式經 JupyterLab :26501 傳入容器，在機器人上自主執行，移動全程不依賴 WiFi。
 
 Run scripts directly on the robot's on-board Docker container (Playground) for autonomous operation without network dependency. Scripts use `kachaka_api` (the raw SDK) -- not `kachaka_core` -- because the container only has the pre-installed SDK.
 
 ### Why Playground -- Offline-First Robot Control
 
 In normal mode, your script runs on an external machine and sends gRPC commands to the robot **over WiFi**. If WiFi drops mid-route, the robot stops receiving commands. In Playground mode, the script runs **inside the robot's Docker container** and commands travel through a container-internal virtual network (`100.94.1.1:26400`) that never touches WiFi. The robot can walk into a zero-connectivity zone and keep executing autonomously.
+
+WiFi is only needed for the deploy step: the script is uploaded through **JupyterLab :26501** (REST contents API) and started from a Jupyter terminal — factory password `kachaka`, no SSH key or other setup. The `playground_upload` / `playground_run` MCP tools do this for you. SSH :26500 is an optional dev-time alternative for interactive debugging.
 
 ```mermaid
 graph LR
@@ -904,6 +908,8 @@ graph LR
     subgraph playground["Playground Mode (offline)"]
         CONT["Robot Container"] -->|"100.94.1.1:26400<br/>(internal bridge)"| R2["Robot gRPC"]
     end
+
+    PC -->|"JupyterLab :26501 (deploy)"| CONT
 
     style normal fill:#fff3e0
     style playground fill:#e8f5e9
@@ -931,6 +937,11 @@ graph LR
 | Libraries | stdlib only (`json`, `threading`, `time`, etc.) -- no pip |
 | Ports exposed | 26400 (gRPC), 26500 (SSH), 26501 (JupyterLab) |
 | Script path | `/home/kachaka/<filename>` |
+| Deploy channel | JupyterLab :26501 contents API + terminal (default) / SSH :26500 (dev-time) |
+| Start command | `setsid nohup python3 -u /home/kachaka/<f> > /tmp/<f>.log 2>&1 < /dev/null &` -- `setsid` is mandatory: the Jupyter terminal kills its process group on close |
+| Firmware updates | May wipe `/home/kachaka/` -- re-upload scripts on every deploy |
+
+> On firmware < 3.17.8 JupyterLab may fail to start in Playground; `curl -s -o /dev/null -w '%{http_code}\n' http://<robot-ip>:26501/login` returning `200` means it is reachable. In a Jupyter terminal, write `pgrep`/`pkill` patterns as `x[.]py` -- the terminal echoes the command, so a plain `x.py` pattern matches itself.
 
 ### MCP Tool Workflow
 
@@ -938,9 +949,11 @@ graph LR
 1. playground_upload(ip, script_content, filename)   → push to container
 2. playground_run(ip, filename)                       → start in background
 3. playground_log(ip)                                 → monitor output
-4. playground_stop(ip, filename)                      → stop if needed
-5. playground_status(ip, filename)                    → check if still running
+4. playground_stop(ip, filename=filename)             → stop if needed
+5. playground_status(ip, filename=filename)           → check if still running
 ```
+
+Every tool takes `transport` (default `"auto"` = JupyterLab :26501, falling back to SSH only when `:26501` is unreachable; `"jupyter"` / `"ssh"` force one). Always pass `filename=` to `playground_stop` / `playground_status` -- the default `script.py` targets the wrong process for any other file name. SSH key setup is only needed for `transport="ssh"` or dev-time shell access -- see "Dev-time SSH :26500 (optional)" in [`skills/kachaka-sdk/SKILL.md`](skills/kachaka-sdk/SKILL.md).
 
 ### Example: Offline Multi-Stop Route with IMU Shake Detection
 
@@ -952,11 +965,25 @@ See [`skills/kachaka-sdk/examples/playground_offline_route.py`](skills/kachaka-s
 - **Optional HTTP progress reporting** -- best-effort POST to external server with retry for network recovery
 - **Graceful error recovery** -- returns shelf and goes home on any failure
 
-Deployment via SSH:
+Deployment via MCP tools (preferred -- JupyterLab, no key):
+
+```
+playground_upload(ip, script_content, "offline_route.py")
+playground_run(ip, "offline_route.py")
+playground_log(ip)
+```
+
+Manual via JupyterLab (browser, no key): open `http://<robot-ip>:26501` (password `kachaka`), upload `playground_offline_route.py` with the file browser (or drag-drop it in) so it lands in `/home/kachaka/`, open a Terminal from the launcher, and run:
+
+```bash
+setsid nohup python3 -u /home/kachaka/playground_offline_route.py > /tmp/route.log 2>&1 < /dev/null &
+```
+
+Dev-time over SSH (needs an SSH key in the container's `~/.ssh/authorized_keys`):
 
 ```bash
 scp -P 26500 playground_offline_route.py kachaka@<robot-ip>:/home/kachaka/
-ssh -p 26500 kachaka@<robot-ip> "nohup python3 -u /home/kachaka/playground_offline_route.py > /tmp/route.log 2>&1 &"
+ssh -p 26500 kachaka@<robot-ip> "setsid nohup python3 -u /home/kachaka/playground_offline_route.py > /tmp/route.log 2>&1 < /dev/null &"
 ```
 
 ## Remote Access via Tailscale (VPN)
@@ -1212,8 +1239,9 @@ pytest tests/test_commands.py::TestRetry
 | `test_detection.py` | 14 | Detections, capture+detect, annotation, label mapping, error handling |
 | `test_server_controller.py` | 13 | MCP controller tools: start/stop lifecycle, idempotency, state dict, controller_rotate |
 | `test_transform.py` | 12 | TransformStreamer lifecycle, auto-reconnect, stats, thread safety |
-| `test_playground.py` | 12 | Playground SSH upload/run/stop/log/status (requires `asyncssh` extra) |
-| **Total** | **331 tests** | |
+| `test_playground.py` | 14 | Playground SSH upload/run/stop/log/status (subprocess ssh, mocked; ssh failure ≠ idle) |
+| `test_playground_jupyter.py` | 33 | Playground JupyterLab transport (contents API + terminal, mocked) |
+| **Total** | **387 tests** | |
 
 All tests use the `_clean_pool` autouse fixture to ensure isolation between tests.
 
@@ -1246,6 +1274,8 @@ graph LR
         C_CTRL["controller.py — RobotController + polling"]
         C_DET["detection.py — ObjectDetector + annotation"]
         C_TF["transform.py — TransformStreamer (dynamic TF)"]
+        C_PG["playground.py — Playground facade + PlaygroundSSH"]
+        C_PGJ["playground_jupyter.py — PlaygroundJupyter (JupyterLab :26501)"]
         C_ERR["error_handling.py — @with_retry"]
     end
 

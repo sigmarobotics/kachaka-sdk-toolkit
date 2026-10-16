@@ -13,6 +13,9 @@ import asyncio
 import logging
 import shlex
 import tempfile
+import urllib.request
+
+from .playground_jupyter import _JUPYTER_HINT, PORT as _JUPYTER_PORT, PlaygroundJupyter
 
 logger = logging.getLogger(__name__)
 
@@ -113,10 +116,12 @@ class PlaygroundSSH:
     async def stop(ip: str, filename: str = "script.py") -> dict:
         """Stop a running script (pkill -f)."""
         try:
-            rc, _, _ = await PlaygroundSSH._run_cmd(
+            rc, _, stderr = await PlaygroundSSH._run_cmd(
                 [*PlaygroundSSH._ssh_base(ip),
                  f"pkill -f 'python3.*{filename}'"],
             )
+            if rc == 255:  # ssh itself failed — unreachable is not "nothing to stop"
+                raise RuntimeError(stderr.strip() or "ssh connection failed")
             return {"ok": True, "stopped": rc == 0}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -147,10 +152,12 @@ class PlaygroundSSH:
     async def status(ip: str, filename: str = "script.py") -> dict:
         """Check if a script is currently running."""
         try:
-            rc, stdout, _ = await PlaygroundSSH._run_cmd(
+            rc, stdout, stderr = await PlaygroundSSH._run_cmd(
                 [*PlaygroundSSH._ssh_base(ip),
                  f"pgrep -f 'python3.*{filename}'"],
             )
+            if rc == 255:  # ssh itself failed — unreachable is not "idle"
+                raise RuntimeError(stderr.strip() or "ssh connection failed")
             pid_str = stdout.strip()
             if rc == 0 and pid_str:
                 pid = int(pid_str.splitlines()[0])
@@ -158,3 +165,81 @@ class PlaygroundSSH:
             return {"ok": True, "running": False}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+
+_TRANSPORTS = ("auto", "jupyter", "ssh")
+
+
+class Playground:
+    """Transport-selecting facade over ``PlaygroundJupyter`` / ``PlaygroundSSH``.
+
+    ``transport="auto"`` (default) uses JupyterLab :26501 when its login page
+    answers, else falls back to SSH :26500 (dev-time). The chosen transport's
+    error is returned as-is — no silent retry on the other one. When Jupyter
+    is unreachable and SSH also fails, the error carries both setup hints.
+    """
+
+    @staticmethod
+    async def _jupyter_reachable(ip: str) -> bool:
+        """GET http://<host>:26501/login (3 s timeout); HTTP 200 → True."""
+        url = f"http://{ip.split(':')[0]}:{_JUPYTER_PORT}/login"
+
+        def _get() -> bool:
+            try:
+                with urllib.request.urlopen(url, timeout=3) as resp:
+                    return resp.status == 200
+            except Exception:
+                return False
+
+        return await asyncio.to_thread(_get)
+
+    @staticmethod
+    async def _dispatch(method: str, ip: str, transport: str, *args) -> dict:
+        if transport not in _TRANSPORTS:
+            return {
+                "ok": False,
+                "error": f"invalid transport {transport!r}; use one of {', '.join(_TRANSPORTS)}",
+            }
+        if transport == "jupyter":
+            return await getattr(PlaygroundJupyter, method)(ip, *args)
+        if transport == "ssh":
+            return await getattr(PlaygroundSSH, method)(ip, *args)
+        if await Playground._jupyter_reachable(ip):
+            return await getattr(PlaygroundJupyter, method)(ip, *args)
+        result = await getattr(PlaygroundSSH, method)(ip, *args)
+        if result.get("ok") is False:
+            ssh_hint = _SSH_SETUP_HINT.format(ip=ip.split(":")[0])
+            result = {
+                **result,
+                "error": f"{result.get('error', '')}\n\n{_JUPYTER_HINT}\n\n{ssh_hint}",
+            }
+        return result
+
+    @staticmethod
+    async def upload(
+        ip: str, script_content: str, filename: str = "script.py",
+        *, transport: str = "auto",
+    ) -> dict:
+        return await Playground._dispatch("upload", ip, transport, script_content, filename)
+
+    @staticmethod
+    async def run(
+        ip: str, filename: str = "script.py", log_path: str = "/tmp/script.log",
+        *, transport: str = "auto",
+    ) -> dict:
+        return await Playground._dispatch("run", ip, transport, filename, log_path)
+
+    @staticmethod
+    async def stop(ip: str, filename: str = "script.py", *, transport: str = "auto") -> dict:
+        return await Playground._dispatch("stop", ip, transport, filename)
+
+    @staticmethod
+    async def log(
+        ip: str, log_path: str = "/tmp/script.log", tail_lines: int = 50,
+        *, transport: str = "auto",
+    ) -> dict:
+        return await Playground._dispatch("log", ip, transport, log_path, tail_lines)
+
+    @staticmethod
+    async def status(ip: str, filename: str = "script.py", *, transport: str = "auto") -> dict:
+        return await Playground._dispatch("status", ip, transport, filename)

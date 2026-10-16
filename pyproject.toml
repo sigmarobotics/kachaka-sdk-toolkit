@@ -27,7 +27,14 @@ dependencies = [
 [project.optional-dependencies]
 # MCP server: install as kachaka-sdk-toolkit[mcp]
 # Ported to the mcp 2.x API (MCPServer); 1.x lacks it, 3.x is unknown.
-mcp = ["mcp[cli]>=2,<3"]
+# websockets (also pulled in by [mcp]) drives the JupyterLab :26501 terminal
+# for Playground deployment: install as kachaka-sdk-toolkit[playground].
+# Floor 14: top-level websockets.connect became the new asyncio implementation
+# (the one with additional_headers=) in 14.0 (2024-11-09).
+# Ceiling <17: 17.x requires Python >=3.11 while this package supports 3.10;
+# matches the sigma-button-offline pin.
+mcp = ["mcp[cli]>=2,<3", "websockets>=14,<17"]
+playground = ["websockets>=14,<17"]
 dev = ["pytest", "pytest-mock"]
 
 [project.urls]

@@ -105,6 +105,15 @@ class TestStop:
         assert result["ok"] is True
         assert result["stopped"] is False
 
+    def test_stop_ssh_failure_is_not_idle(self):
+        # ssh exit 255 = transport failure (CORNER-017: unreachable is not idle).
+        with _patch_run_cmd(returncode=255, stderr="ssh: connect to host port 26500: No route to host"):
+            result = _run(PlaygroundSSH.stop("192.168.1.10", "test.py"))
+
+        assert result["ok"] is False
+        assert "No route to host" in result["error"]
+        assert "stopped" not in result
+
 
 class TestLog:
     def test_log_success(self):
@@ -139,3 +148,12 @@ class TestStatus:
 
         assert result["ok"] is True
         assert result["running"] is False
+
+    def test_status_ssh_failure_is_not_idle(self):
+        # ssh exit 255 = transport failure (CORNER-017: unreachable is not idle).
+        with _patch_run_cmd(returncode=255, stderr="Permission denied (publickey)"):
+            result = _run(PlaygroundSSH.status("192.168.1.10", "test.py"))
+
+        assert result["ok"] is False
+        assert "Permission denied" in result["error"]
+        assert "running" not in result

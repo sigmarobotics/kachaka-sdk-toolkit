@@ -1,13 +1,13 @@
 ---
 name: kachaka-sdk
-description: Use when tasks involve Kachaka robot control, status queries, connection management, or patrol scripting
+description: Use when tasks involve Kachaka robot control, status queries, connection management, patrol scripting, or offline execution (離線模式 / 離線執行 / Playground / JupyterLab deployment of on-robot scripts)
 ---
 
 # Kachaka Robot SDK Skill
 
 ## Critical Rules (READ FIRST)
 
-**STOP. Before writing ANY Kachaka code, internalize these 6 rules.**
+**STOP. Before writing ANY Kachaka code, internalize these 7 rules.**
 
 0. **NEVER AIM A MOVE AT A SHELF**: `move_to_location` / `move_to_pose` must not
    target a pose occupied by a shelf — **including that shelf's home location**.
@@ -23,6 +23,7 @@ description: Use when tasks involve Kachaka robot control, status queries, conne
 3. **RETRY**: `@with_retry` is already applied to ALL KachakaCommands and KachakaQueries methods. NEVER write `try/except` + `time.sleep` retry loops — the SDK handles this.
 4. **CAMERA**: `CameraStreamer` runs in a background daemon thread. NEVER call `get_front_camera_image()` in a loop — it blocks your main thread and drops frames.
 5. **PATROL**: Use `RobotController` for multi-step sequences (background polling + metrics + command_id verification). `KachakaCommands` is for simple one-shot operations ONLY.
+6. **OFFLINE MODE (離線模式)**: Offline mode means uploading your script into the robot's on-board Playground container through **JupyterLab :26501** and running it there — factory password `kachaka`, no key or other setup needed. Use the `playground_upload` / `playground_run` MCP tools (default `transport="auto"` = JupyterLab). SSH :26500 is only for dev-time debugging. 離線模式＝程式經 JupyterLab :26501 傳進機器人容器（Playground）執行，出廠密碼 `kachaka`，不需任何金鑰；用 `playground_upload` / `playground_run` MCP 工具（預設 transport=auto＝Jupyter）；SSH :26500 只用於 dev-time 除錯。See "Playground Offline Execution".
 
 ## When to Use
 
@@ -1447,7 +1448,7 @@ def my_new_command(ip: str, param: str) -> dict:
 | Error descriptions | Auto-enriched in all results | `get_error_definitions()` + manual lookup |
 | gRPC timeout protection | `TimeoutInterceptor` (5s default / 300s long-poll) | Per-call `timeout=` parameter |
 | Recover from localization jump | `cmds.set_robot_pose()` + `cmds.localize()` | Restart the robot or re-map |
-| Deploy script to robot | `playground_upload` + `playground_run` MCP tools | `scp` + `ssh` commands manually |
+| Deploy script to robot (離線模式) | `playground_upload` + `playground_run` MCP tools (JupyterLab :26501, no key) | `scp`/`ssh` by hand, or asking the user to set up SSH keys first |
 | Offline route execution | Playground snippets (scaffold + IMU + route) | Custom scripts from scratch |
 
 ## Anti-patterns Summary
@@ -1468,6 +1469,7 @@ See inline :x: markers throughout this document for detailed anti-patterns with 
 | State check | Only check command state | Also check `command_id` change |
 | Playground | `kachaka_core` inside container | `kachaka_api` direct (pre-installed) |
 | Playground | Forget `update_resolver()` | Always call after client init |
+| Playground | `scp`/`ssh` by hand, or asking the user to set up SSH keys first | `playground_upload` + `playground_run` MCP tools (JupyterLab, no key) |
 | Stopping | `stop_manual_drive()` (or old `stop()`) to halt navigation | `cancel_command()` — the only one that stops a moving robot |
 | Shelves | Nav goal at a shelf pose or its home location | `move_shelf` / `return_shelf` / `dock_any_shelf_with_registration` |
 | Docking | Wrapping dock commands in your own retry loop | Firmware retries internally — set one timeout and trust it |
@@ -1485,6 +1487,8 @@ The underlying `kachaka-api` SDK (>= 3.17, pinned by this toolkit) provides:
 `kachaka_core` wraps the sync client with connection pooling, retry logic, and structured responses. The async client is available for advanced use cases (streaming, callbacks) but is not wrapped by this toolkit.
 
 ## Playground Offline Execution
+
+> 俗稱「離線模式」／offline mode／Playground 執行——三者同義。程式經 JupyterLab :26501 傳入容器，在機器人上自主執行，移動全程不依賴 WiFi。
 
 Run scripts directly on the robot's on-board Docker container (Playground).
 Scripts use `kachaka_api` (the raw SDK) — NOT `kachaka_core` — because the
@@ -1508,6 +1512,7 @@ graph LR
     subgraph pg["Playground — no WiFi needed"]
         RC["Robot Container"] -->|"internal 100.94.1.1:26400"| R2["Robot gRPC"]
     end
+    PC -->|"JupyterLab :26501 (deploy only)"| RC
 ```
 
 ### When to Use Playground (vs. kachaka_core)
@@ -1526,7 +1531,7 @@ unavailable — even for a few seconds during movement — use Playground.
 
 ### How It Works
 
-1. **Deploy phase (requires WiFi)**: Upload script to robot via SSH (:26500) or MCP `playground_upload`
+1. **Deploy phase (requires WiFi)**: Upload and start the script through **JupyterLab :26501** (REST contents API upload + a Jupyter terminal to start it; factory password `kachaka`, no key) — the `playground_upload` / `playground_run` MCP tools do this for you. SSH :26500 is a dev-time alternative.
 2. **Execute phase (no WiFi needed)**: Script runs inside the container, all gRPC calls go through `100.94.1.1:26400` (container ↔ host internal bridge, never touches WiFi)
 3. **Report phase (optional, best-effort)**: If WiFi exists, script can POST progress to external server; if not, silently skips
 
@@ -1542,9 +1547,38 @@ unavailable — even for a few seconds during movement — use Playground.
 | WiFi required | Yes, throughout execution | Only for deploy; execution is offline |
 | Operator interaction | Network-based (API, WebSocket, etc.) | Physical: IMU shake detection |
 
-### SSH Key Setup (Prerequisites)
+### Deploy channel: JupyterLab :26501 (default, no setup)
 
-Before using `playground_*` MCP tools, set up SSH key auth:
+Every Playground container runs JupyterLab on port **26501** with the fixed
+factory password `kachaka`. That is the deploy channel: files go in through
+JupyterLab's REST contents API and the script is started from a Jupyter
+terminal. Nothing has to be configured on the robot or on your machine — no
+SSH key, no `authorized_keys`.
+
+Check that it is reachable:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://<robot-ip>:26501/login   # 200 = reachable
+```
+
+> :warning: On firmware < 3.17.8 JupyterLab may fail to start in Playground. If `:26501` does not come up, check `conn.version` before debugging the network or the password.
+
+All five `playground_*` MCP tools take a `transport` parameter:
+
+| `transport` | Behaviour |
+|---|---|
+| `"auto"` (default) | JupyterLab first; falls back to SSH only when `:26501` is unreachable |
+| `"jupyter"` | JupyterLab only |
+| `"ssh"` | SSH :26500 only (needs the key setup below) |
+
+Every deploy re-uploads the files — a firmware update can wipe `/home/kachaka/`,
+so never assume a script uploaded earlier is still there.
+
+### Dev-time SSH :26500 (optional)
+
+SSH is **not needed to deploy or run** offline scripts. Set it up only if you
+want interactive debugging from your machine (`tail -f` on a log, a shell in the
+container), or want to force `transport="ssh"`:
 
 1. **Generate a key** (if you don't have one):
    ```bash
@@ -1563,9 +1597,7 @@ Before using `playground_*` MCP tools, set up SSH key auth:
    ssh -p 26500 kachaka@<robot-ip>
    ```
 
-> The MCP tools auto-detect SSH keys (agent → `~/.ssh/id_ed25519` → `~/.ssh/id_rsa`). No need to specify the key path.
-
-> :warning: On firmware < 3.17.8 JupyterLab may fail to start in Playground. If `:26501` does not come up, check `conn.version` before debugging the network or the password.
+> Only relevant for `transport="ssh"` (or the auto fallback): the MCP tools auto-detect SSH keys (agent → `~/.ssh/id_ed25519` → `~/.ssh/id_rsa`). No need to specify the key path. With the default JupyterLab transport no key is involved at all.
 
 ### Container Environment Constraints
 
@@ -1578,13 +1610,16 @@ When generating scripts for Playground, follow these rules:
 | Libraries | stdlib only: `json`, `threading`, `time`, `logging`, `signal`, etc. |
 | Blocking | All move commands block by default (`wait_for_completion=True`) |
 | Script path | `/home/kachaka/<filename>` |
-| Log path | `/tmp/<filename>.log` |
+| Log path | The `log_path` you pass to `playground_run` (default `/tmp/script.log`; pass the same value to `playground_log`). Manual starts conventionally use `/tmp/<filename>.log` |
 | Firmware | Auto-update is on by default (3.4.7+: download overnight, install early morning) and may wipe `/home/kachaka/` — re-check `conn.version`, re-upload scripts |
 | Daily restart | Default 04:00–04:10 (Pro can set the time since 3.16.1); relaunch daemons from `/home/kachaka/kachaka_startup.sh`. On Pro < 3.18.1 an update could fail after its restart on sites without internet |
+| Deploy channel | JupyterLab :26501 contents API + terminal (default) / SSH :26500 (dev-time) |
+| Start command | `setsid nohup python3 -u /home/kachaka/<f> > /tmp/<f>.log 2>&1 < /dev/null &` — `setsid` is mandatory: the Jupyter terminal kills its process group on close (`nohup` alone does not survive it, and `import kachaka_api` takes seconds, so the script dies during start-up) |
 
 > :x: **NEVER**: Use `kachaka_core` inside Playground scripts — it's not installed in the container
 > :x: **NEVER**: Forget `client.update_resolver()` — names sent as raw IDs cause error_code 10250
 > :x: **NEVER**: Start an HTTP server — only ports 26400/26500/26501 are exposed
+> :x: **NEVER**: `pgrep`/`pkill -f 'x.py'` from a Jupyter terminal — the terminal echoes the command, so the pattern matches the echoed command itself. The tools use the bracket pattern `x[.]py`; do the same in hand-written commands. For the same reason split any marker string you `echo` and then look for (`echo KACHAKA-"OK"`, not `echo KACHAKA-OK`).
 
 ### MCP Tool Workflow
 
@@ -1593,9 +1628,16 @@ When generating scripts for Playground, follow these rules:
 2. playground_upload(ip, script_content, filename)   → push to container
 3. playground_run(ip, filename)                       → start in background
 4. playground_log(ip)                                 → monitor output
-5. playground_stop(ip, filename)                      → stop if needed
-6. playground_status(ip, filename)                    → check if still running
+5. playground_stop(ip, filename=filename)             → stop if needed
+6. playground_status(ip, filename=filename)           → check if still running
 ```
+
+- Every tool takes `transport` (default `"auto"` = JupyterLab :26501, SSH only
+  when `:26501` is unreachable) — see "Deploy channel" above.
+- Always pass `filename=` to `playground_stop` / `playground_status`: the default
+  `script.py` targets the wrong process for any other file name.
+- `playground_run` writes to `log_path` (default `/tmp/script.log`), which is also
+  `playground_log`'s default — pass the same `log_path=` to both if you change it.
 
 ### Composable Code Snippets
 
@@ -1807,12 +1849,24 @@ all building blocks into a complete offline delivery workflow.
 **Deployment:**
 
 ```bash
-# Upload and run via MCP tools (preferred)
+# Upload and run via MCP tools (preferred — JupyterLab, no key)
 playground_upload(ip, script_content, "offline_route.py")
 playground_run(ip, "offline_route.py")
 playground_log(ip)
+```
 
-# Or via SSH directly
+Manual via JupyterLab (browser, no key):
+
+1. Open `http://<robot-ip>:26501`, password `kachaka`.
+2. Upload `playground_offline_route.py` with the file browser's upload button (or drag-drop it in); it lands in `/home/kachaka/`.
+3. Open a Terminal from the launcher and run:
+   ```bash
+   setsid nohup python3 -u /home/kachaka/playground_offline_route.py > /tmp/route.log 2>&1 < /dev/null &
+   ```
+
+Dev-time over SSH (needs the optional key setup):
+
+```bash
 scp -P 26500 playground_offline_route.py kachaka@<robot-ip>:/home/kachaka/
-ssh -p 26500 kachaka@<robot-ip> "nohup python3 -u /home/kachaka/playground_offline_route.py > /tmp/route.log 2>&1 &"
+ssh -p 26500 kachaka@<robot-ip> "setsid nohup python3 -u /home/kachaka/playground_offline_route.py > /tmp/route.log 2>&1 < /dev/null &"
 ```

@@ -8,5 +8,5 @@
   "homepage": "https://github.com/Sigma-Snaken/kachaka-sdk-toolkit",
   "repository": "https://github.com/Sigma-Snaken/kachaka-sdk-toolkit",
   "license": "MIT",
-  "keywords": ["kachaka", "robot", "mcp", "grpc", "camera", "detection"]
+  "keywords": ["kachaka", "robot", "mcp", "grpc", "camera", "detection", "offline", "playground", "jupyter"]
 }

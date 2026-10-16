@@ -34,7 +34,7 @@ except ImportError as _exc:  # pragma: no cover
     ) from _exc
 
 from kachaka_core.commands import KachakaCommands
-from kachaka_core.playground import PlaygroundSSH
+from kachaka_core.playground import Playground
 from kachaka_core.camera import CameraStreamer
 from kachaka_core.connection import KachakaConnection
 from kachaka_core.controller import RobotController
@@ -1195,57 +1195,92 @@ def stop_transform_stream(ip: str) -> dict:
     return {"ok": True, "message": "transform stream stopped", "stats": streamer.stats}
 
 
-# ── Playground (SSH to on-board container) ──────────────────────────
+# ── Playground (on-board container: JupyterLab :26501 default, SSH fallback) ──
 
 
 @mcp.tool()
 async def playground_upload(
     ip: str, script_content: str, filename: str = "script.py",
+    transport: str = "auto",
 ) -> dict:
-    """Upload a Python script to the Kachaka Playground container via SSH.
+    """Upload a Python script to the Kachaka Playground container.
 
     The script is written to /home/kachaka/<filename> on the robot's
     on-board Docker container. Use ``playground_run`` to execute it.
+
+    Transport: JupyterLab :26501 (factory password ``kachaka``, no key
+    required) by default; SSH :26500 only as a dev-time fallback.
+    ``transport`` = ``auto`` (Jupyter if :26501 answers, else SSH) |
+    ``jupyter`` | ``ssh``.
     """
-    return await PlaygroundSSH.upload(ip, script_content, filename)
+    return await Playground.upload(ip, script_content, filename, transport=transport)
 
 
 @mcp.tool()
 async def playground_run(
     ip: str, filename: str = "script.py", log_path: str = "/tmp/script.log",
+    transport: str = "auto",
 ) -> dict:
     """Start a script in background on the Playground container.
 
-    The script runs detached (nohup) so it survives SSH disconnection.
-    Output is redirected to ``log_path``. Use ``playground_log`` to read it.
+    The script runs detached (setsid nohup) so it survives the deploying
+    session closing. Output is redirected to ``log_path``. Use
+    ``playground_log`` to read it.
+
+    Transport: JupyterLab :26501 (factory password ``kachaka``, no key
+    required) by default; SSH :26500 only as a dev-time fallback.
+    ``transport`` = ``auto`` (Jupyter if :26501 answers, else SSH) |
+    ``jupyter`` | ``ssh``.
     """
-    return await PlaygroundSSH.run(ip, filename, log_path)
+    return await Playground.run(ip, filename, log_path, transport=transport)
 
 
 @mcp.tool()
-async def playground_stop(ip: str, filename: str = "script.py") -> dict:
-    """Stop a running script on the Playground container (pkill -f)."""
-    return await PlaygroundSSH.stop(ip, filename)
+async def playground_stop(
+    ip: str, filename: str = "script.py", transport: str = "auto",
+) -> dict:
+    """Stop a running script on the Playground container (pkill -f).
+
+    Transport: JupyterLab :26501 (factory password ``kachaka``, no key
+    required) by default; SSH :26500 only as a dev-time fallback.
+    ``transport`` = ``auto`` (Jupyter if :26501 answers, else SSH) |
+    ``jupyter`` | ``ssh``.
+    """
+    return await Playground.stop(ip, filename, transport=transport)
 
 
 @mcp.tool()
 async def playground_log(
     ip: str, log_path: str = "/tmp/script.log", tail_lines: int = 50,
+    transport: str = "auto",
 ) -> dict:
     """Read the tail of a script log from the Playground container.
 
     Returns the last ``tail_lines`` lines from the log file.
+
+    Transport: JupyterLab :26501 (factory password ``kachaka``, no key
+    required) by default; SSH :26500 only as a dev-time fallback.
+    ``transport`` = ``auto`` (Jupyter if :26501 answers, else SSH) |
+    ``jupyter`` | ``ssh``.
     """
-    return await PlaygroundSSH.log(ip, log_path, tail_lines)
+    return await Playground.log(ip, log_path, tail_lines, transport=transport)
 
 
 @mcp.tool()
-async def playground_status(ip: str, filename: str = "script.py") -> dict:
+async def playground_status(
+    ip: str, filename: str = "script.py", transport: str = "auto",
+) -> dict:
     """Check if a script is currently running on the Playground container.
 
-    Returns running state and PID if active.
+    Returns running state and PID if active. If the robot cannot be read
+    the result is ``ok: False`` — never ``running: False``.
+
+    Transport: JupyterLab :26501 (factory password ``kachaka``, no key
+    required) by default; SSH :26500 only as a dev-time fallback.
+    ``transport`` = ``auto`` (Jupyter if :26501 answers, else SSH) |
+    ``jupyter`` | ``ssh``.
     """
-    return await PlaygroundSSH.status(ip, filename)
+    return await Playground.status(ip, filename, transport=transport)
 
 
 # ── Entry point ──────────────────────────────────────────────────────

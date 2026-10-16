@@ -11,6 +11,7 @@ from .camera import CameraStreamer
 from .controller import RobotController
 from .detection import ObjectDetector
 from .transform import TransformStreamer
-from .playground import PlaygroundSSH
+from .playground import PlaygroundSSH, Playground
+from .playground_jupyter import PlaygroundJupyter, JupyterClient
 
-__all__ = ["KachakaConnection", "ConnectionState", "KachakaCommands", "KachakaQueries", "CameraStreamer", "RobotController", "ObjectDetector", "TransformStreamer", "PlaygroundSSH"]
+__all__ = ["KachakaConnection", "ConnectionState", "KachakaCommands", "KachakaQueries", "CameraStreamer", "RobotController", "ObjectDetector", "TransformStreamer", "PlaygroundSSH", "Playground", "PlaygroundJupyter", "JupyterClient"]
