@@ -319,6 +319,10 @@ cmds.undock_shelf()               # set the carried shelf down here
 
 ### How docking physically works
 
+Shelf dimensions (Kachaka Base S4A01/S4A02: 393 × 320 × 141 mm, casters at the corners)
+and what the LiDAR sees with a shelf docked are in
+[`references/shelf-hardware.md`](references/shelf-hardware.md).
+
 The robot drives **underneath** the shelf; a motor-driven catch then springs up
 and hooks the shelf's frame. It is a catch, not a clamp and not a platform lift
 — so **a shelf can come off in transit**, and shelf-drop monitoring is guarding
