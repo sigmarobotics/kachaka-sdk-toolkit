@@ -120,6 +120,34 @@ if firmware >= (3, 17):        # NOT a string compare — "3.9" > "3.17" as stri
     cmds.play_sound(sound_id)
 ```
 
+## Platform boundaries (vendor layer)
+
+Limits that come from the robot itself — firmware, hardware, the mobile app —
+not from any one customer site. Each line names the firmware / robot / date it
+was measured on; re-measure after a firmware update. **Projects link here and
+record only site facts** (site network, power, staff habits, schedules) in their
+site config (`site/<場域>.json` `_boundary_note`) or the project's
+`<site>-site.md` memory — never copy these lines into a project.
+
+| Boundary | What to do | Measured on |
+|---|---|---|
+| **Daily automatic reboot**, at a different time per robot: 板榮 BKP40311T 03:09 (2026-09-30, 10-02) and 03:01 (10-07); 新營 BKP60UZ1T ≈05:00 (fw 3.16.1, 2026-07-26); 沙崙 ≈04:04. Offline ~3 min; gRPC unavailable ~60 s after boot | Measure the window per robot before scheduling; schedulers keep runs clear of that robot's window — never hard-code one time. A run that straddles it loses the shelf mid-route (板榮 10-02: SHELF DROP, `return_home` 11501) | bio-patrol / vp field logs; 板榮 fw 3.18.2 (as of 2026-10-19) |
+| **Pause key / pause state**: a paused robot (`21051`) still *accepts* every command, then rejects it with `10107` — for as long as nobody presses the power button. No gRPC call clears it (`proceed()` is a different wait state) | Check `get_errors()` / `is_ready()` for `21051` before a run; a run whose every step ended `10107` did not run — report it as failed, never completed. Details: **Stopping the Robot** below | 板榮 BKP40311T: staff pressed pause, 27 nights of all-`10107` (2026-09-02 → 09-29). `restart_robot()` also came back paused once (visual-patrol robot-a, 2026-07-08) |
+| **Speaker volume can be 0** (fully silent on fw ≥ 3.5.1) — `speak()` / `play_sound()` then succeed with no sound | Read → set → play → restore the original volume | 板榮 BKP40311T base volume 0 (bio-patrol IT-24, 2026-10-19) |
+| **App 任務佇列 (task queue) is App-only** — no RPC reads it | Keep it off where software overrides commands. Measured with it **off**: `cancel_all=True` overrides with a 1–2 s brake; `cancel_all=False` queues at firmware level regardless. Behaviour with it **on** is unmeasured. See [`references/command-semantics-field-3.18.1.md`](references/command-semantics-field-3.18.1.md) | 三菱 pro-10 fw 3.18.1 + 沙崙1, 2026-09-23 |
+| **Door-point skip flags** (略過位置調整 / 略過方向調整) live in private Location fields #12 / #13 — invisible to the public SDK, set in the App | They apply only to named-point moves (`move_shelf` / `move_to_location`), not to `move_to_pose` waypoints | kiosk, 三菱 pro-10 |
+| Other **App-only settings** (Keep hold furniture, charge while holding, safety/obstacle detectors…) | **App settings that break the API invisibly** and **Advising Users on App Settings** below | — |
+| **Auto-homing is a persistent robot setting** — a script that turns it off and dies (SIGKILL, two executors) leaves it off with no alert | Restore from a configured value, not "whatever I saw at start"; check `queries.get_auto_homing_enabled()` after any run that touched it | kiosk HIL 2026-09 (robot left 14 cm off the dock, not charging, 4 min) |
+| **Blocking calls can hang when another command takes over**: a blocking `return_home()` superseded by `StartCommand(cancel_all=True)` hung the full 120 s in 2/3 trials (`cancel_command` instead: 0/3) | Issue non-blocking and poll with a deadline (pattern in the 3.18.1 reference §7); give every wait on the robot a deadline | home Pro 2 BKP40HD1T, fw 3.18.1 / kachaka-api 3.17.5, 2026-09-30 |
+| **Shelf parked against a wall cannot be rotated in place** (sweep radius hits the wall). Firmware stores shelf pose *with theta*: after dock → rotate → undock (or a manual flip) every later placement auto-rotates to compensate. While docked, `rotate_in_place` can return `success=False, error_code=0` either way. A docked shelf left idle for minutes is put away by the firmware | Rotate in open floor; `reset_shelf_pose()` after any flip; verify rotation by pose delta, not the result | 新營, kachaka-api 3.17.5, 2026-08-06 |
+| **~12 kg body → low hazard capacity**; customer sites commonly run with firmware safety settings off | User-set framing, not a measurement: how much weight safety gets is decided by robot + payload mass/speed and the people on site, recorded per app — not a fixed rule | user, 2026-09-26 |
+
+Already covered elsewhere in this skill and not repeated here: e-stop latch
+clears only by the hardware button, error descriptions must be pulled from the
+robot (firmware changes them), `get_moving_shelf_id()` before trusting a
+carried shelf, shelf legs in the LiDAR near-field filter, localization jumps,
+and the 3.18.1 override / history / idle-state semantics.
+
 ## Quick Start
 
 ```python
